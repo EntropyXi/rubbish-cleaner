@@ -69,3 +69,32 @@
   clean-drive.ps1 收到的永远是字面路径（-LiteralPath）。
 - 任何模板目标不存在 → 静默跳过，绝不创建目录、绝不误伤相邻路径。
 - 新增分类目标必须先在这里登记模板，再实现到 scan-drive.ps1（单一事实来源）。
+
+### Linux / macOS
+
+> **占位符约定（Linux/macOS）**：`{cache}` = `Get-UserCacheDir`（Linux `$XDG_CACHE_HOME`
+> 或 `~/.cache`，macOS `~/Library/Caches`）；`{temp}` = `Get-SystemTempDir`（Linux/macOS
+> 均为 `/tmp`）；`~` = `$env:HOME`。路径分隔统一用 `/`。
+> 全部条目仅在用户盘（`/`）时评估（`$isUserDrive = $Drive -eq '/'`）；扫描侧由
+> `scan-drive.ps1` 的 `if (-not $script:IsWindows)` 分支解析，**分类 id 与 Windows 完全相同**，
+> 仅路径模板不同。
+
+| App | 路径模板 | 分类 | 备注 |
+|-----|----------|------|------|
+| pip（仅用户盘） | `{cache}/pip` | dev-caches | 包下载缓存；目录本身保留 |
+| npm（仅用户盘） | `{cache}/npm` | dev-caches | `_cacache` 内容 |
+| PyTorch（仅用户盘） | `{cache}/torch` | dev-caches | 模型 hub/checkpoints 缓存 |
+| HuggingFace（仅用户盘） | `{cache}/huggingface` | dev-caches | hub 缓存与 .incomplete blob |
+| opencode（仅用户盘） | `{cache}/opencode` | dev-caches | 同 Windows `~\.cache\opencode` |
+| Codex（仅用户盘） | `{cache}/codex-runtimes` | dev-caches | 运行时常量缓存 |
+| 通用 .cache（仅用户盘） | `{cache}/*` 顶层文件（>7 天） | user-temp | 只删顶层文件，不递归子目录 |
+| 系统临时目录 | `{temp}/*` 顶层文件（>7 天） | root-temps | `/tmp` 顶层文件，>7 天 |
+| Chrome（仅用户盘） | `{cache}/google-chrome/Default/{Cache, Code Cache, GPUCache}` | browser-caches | 配置档永不碰 |
+| Firefox（仅用户盘） | `{cache}/mozilla/firefox/*/cache2/` | browser-caches | 每个配置档 profile 下的 cache2 |
+| Edge（仅用户盘） | `{cache}/microsoft-edge/Default/{Cache, Code Cache, GPUCache}` | browser-caches | 同上 |
+| JetBrains IDE（仅用户盘） | `{cache}/JetBrains/*/`（caches/log） | ide-caches | 每个 IDE 各自一行 |
+| VS Code（仅用户盘） | `~/.config/Code/{Cache, CachedData, logs}/` | ide-caches | 配置/扩展目录永不碰 |
+| Zotero（仅用户盘） | `{cache}/zotero/{cache2, startupCache, shader-cache}` | ide-caches | 配置档 .sqlite 永不碰 |
+| 崩溃转储 | `/var/crash/*` | crash-dumps | apport 崩溃报告 |
+| 缩略图（仅用户盘） | `{cache}/thumbnails/` | thumbnail-cache | normal/large/fail 子目录 |
+| 回收站（仅用户盘） | `~/.local/share/Trash/` | recycle-bin | ASK 分类；只报告，本流水线不清空 |

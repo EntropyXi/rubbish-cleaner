@@ -33,6 +33,8 @@ param(
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
 . (Join-Path $PSScriptRoot 'lib\rubbish-core.ps1')
+# ---- dot-source the cross-platform detection layer (todo 2 deliverable) ----
+. (Join-Path $PSScriptRoot 'lib\platform.ps1')
 
 # =====================================================================
 # <begin-classification>
@@ -529,6 +531,144 @@ function Get-JunkCandidates {
         }
     }
 
+    # ----------------------------------------------------------------
+    # Linux/macOS equivalents (todo 2): SAME category ids as the Windows
+    # branches above -- only the path templates differ, resolved via
+    # Get-UserCacheDir / Get-SystemTempDir from lib/platform.ps1.
+    # $IsUserDrive on non-Windows = ($Drive -eq '/'), so the user-profile
+    # categories below run whenever the single '/' drive is scanned.
+    # ----------------------------------------------------------------
+    if (-not $script:IsWindows) {
+        $cache = Get-UserCacheDir
+        $tmp = Get-SystemTempDir
+
+        # root-temps (SAFE): {temp}/* top-level files older than 7 days
+        if (-not $catFilter -or $catFilter -contains 'root-temps') {
+            $result.Evaluated.Add(@{ name = 'root-temps'; risk = 'SAFE' })
+            if (Test-Path -LiteralPath $tmp -PathType Container) {
+                foreach ($f in Get-ChildItem -LiteralPath $tmp -Force -File -ErrorAction SilentlyContinue) {
+                    if ($f.LastWriteTime -lt $cutoff) {
+                        Add-Candidate -Result $result -Category 'root-temps' -Path $f.FullName -SizeBytes ([int64]$f.Length) -FileCount 1
+                    }
+                }
+            }
+        }
+
+        if ($IsUserDrive) {
+
+            # dev-caches: {cache}/{pip,npm,torch,huggingface,opencode,codex-runtimes}
+            if (-not $catFilter -or $catFilter -contains 'dev-caches') {
+                $result.Evaluated.Add(@{ name = 'dev-caches'; risk = 'SAFE' })
+                foreach ($sub in @('pip', 'npm', 'torch', 'huggingface', 'opencode', 'codex-runtimes')) {
+                    $p = Join-Path $cache $sub
+                    if (Test-Path -LiteralPath $p -PathType Container) {
+                        $stats = Get-DirStatsNoJunction -LiteralPath $p
+                        Add-Candidate -Result $result -Category 'dev-caches' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                    }
+                }
+            }
+
+            # user-temp (SAFE): {cache}/* top-level files older than 7 days
+            if (-not $catFilter -or $catFilter -contains 'user-temp') {
+                $result.Evaluated.Add(@{ name = 'user-temp'; risk = 'SAFE' })
+                foreach ($f in Get-ChildItem -LiteralPath $cache -Force -File -ErrorAction SilentlyContinue) {
+                    if ($f.LastWriteTime -lt $cutoff) {
+                        Add-Candidate -Result $result -Category 'user-temp' -Path $f.FullName -SizeBytes ([int64]$f.Length) -FileCount 1
+                    }
+                }
+            }
+
+            # browser-caches: Chrome/Edge Default\{Cache, Code Cache, GPUCache};
+            # Firefox {cache}/mozilla/firefox/*/cache2/
+            if (-not $catFilter -or $catFilter -contains 'browser-caches') {
+                $result.Evaluated.Add(@{ name = 'browser-caches'; risk = 'SAFE' })
+                foreach ($browser in @('google-chrome', 'microsoft-edge')) {
+                    $default = Join-Path $cache "$browser/Default"
+                    foreach ($sub in @('Cache', 'Code Cache', 'GPUCache')) {
+                        $p = Join-Path $default $sub
+                        if (Test-Path -LiteralPath $p -PathType Container) {
+                            $stats = Get-DirStatsNoJunction -LiteralPath $p
+                            Add-Candidate -Result $result -Category 'browser-caches' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                        }
+                    }
+                }
+                $ff = Join-Path $cache 'mozilla/firefox'
+                if (Test-Path -LiteralPath $ff -PathType Container) {
+                    foreach ($d in Get-ChildItem -LiteralPath $ff -Force -Directory -ErrorAction SilentlyContinue) {
+                        $c2 = Join-Path $d.FullName 'cache2'
+                        if (Test-Path -LiteralPath $c2 -PathType Container) {
+                            $stats = Get-DirStatsNoJunction -LiteralPath $c2
+                            Add-Candidate -Result $result -Category 'browser-caches' -Path $c2 -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                        }
+                    }
+                }
+            }
+
+            # ide-caches: JetBrains */{caches,log}; VS Code ~/.config/Code/
+            # {Cache, CachedData, logs}; Zotero {cache2, startupCache, shader-cache}
+            if (-not $catFilter -or $catFilter -contains 'ide-caches') {
+                $result.Evaluated.Add(@{ name = 'ide-caches'; risk = 'SAFE' })
+                $jb = Join-Path $cache 'JetBrains'
+                if (Test-Path -LiteralPath $jb -PathType Container) {
+                    foreach ($d in Get-ChildItem -LiteralPath $jb -Force -Directory -ErrorAction SilentlyContinue) {
+                        foreach ($sub in @('caches', 'log')) {
+                            $p = Join-Path $d.FullName $sub
+                            if (Test-Path -LiteralPath $p -PathType Container) {
+                                $stats = Get-DirStatsNoJunction -LiteralPath $p
+                                Add-Candidate -Result $result -Category 'ide-caches' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                            }
+                        }
+                    }
+                }
+                $vsc = Join-Path $env:HOME '.config/Code'
+                foreach ($sub in @('Cache', 'CachedData', 'logs')) {
+                    $p = Join-Path $vsc $sub
+                    if (Test-Path -LiteralPath $p -PathType Container) {
+                        $stats = Get-DirStatsNoJunction -LiteralPath $p
+                        Add-Candidate -Result $result -Category 'ide-caches' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                    }
+                }
+                $zo = Join-Path $cache 'zotero'
+                foreach ($sub in @('cache2', 'startupCache', 'shader-cache')) {
+                    $p = Join-Path $zo $sub
+                    if (Test-Path -LiteralPath $p -PathType Container) {
+                        $stats = Get-DirStatsNoJunction -LiteralPath $p
+                        Add-Candidate -Result $result -Category 'ide-caches' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                    }
+                }
+            }
+
+            # crash-dumps: /var/crash (apport crash reports)
+            if (-not $catFilter -or $catFilter -contains 'crash-dumps') {
+                $result.Evaluated.Add(@{ name = 'crash-dumps'; risk = 'SAFE' })
+                if (Test-Path -LiteralPath '/var/crash' -PathType Container) {
+                    $stats = Get-DirStatsNoJunction -LiteralPath '/var/crash'
+                    Add-Candidate -Result $result -Category 'crash-dumps' -Path '/var/crash' -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                }
+            }
+
+            # thumbnail-cache: {cache}/thumbnails
+            if (-not $catFilter -or $catFilter -contains 'thumbnail-cache') {
+                $result.Evaluated.Add(@{ name = 'thumbnail-cache'; risk = 'SAFE' })
+                $p = Join-Path $cache 'thumbnails'
+                if (Test-Path -LiteralPath $p -PathType Container) {
+                    $stats = Get-DirStatsNoJunction -LiteralPath $p
+                    Add-Candidate -Result $result -Category 'thumbnail-cache' -Path $p -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                }
+            }
+
+            # recycle-bin (ASK): ~/.local/share/Trash -- report only
+            if (-not $catFilter -or $catFilter -contains 'recycle-bin') {
+                $result.Evaluated.Add(@{ name = 'recycle-bin'; risk = 'ASK' })
+                $trash = Join-Path $env:HOME '.local/share/Trash'
+                if (Test-Path -LiteralPath $trash -PathType Container) {
+                    $stats = Get-DirStatsNoJunction -LiteralPath $trash
+                    Add-Candidate -Result $result -Category 'recycle-bin' -Path $trash -SizeBytes $stats.SizeBytes -FileCount $stats.FileCount
+                }
+            }
+        }
+    }
+
     return $result
 }
 
@@ -562,7 +702,12 @@ if ($null -eq $vol -or $vol.DriveType -ne 'Fixed') {
 
 # ---- User-profile scope ------------------------------------------------
 # User-profile categories apply ONLY when the user profile lives on $Drive.
-$isUserDrive = $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase)
+# On Linux/macOS there is a single '/' drive, so any '/' scan is the user drive.
+$isUserDrive = if ($script:IsWindows) {
+    $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase)
+} else {
+    $Drive -eq '/'
+}
 
 # ---- Run directory -----------------------------------------------------
 $runName = "$($driveLetter.ToUpperInvariant())-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
