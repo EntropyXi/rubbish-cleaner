@@ -1,0 +1,10 @@
+.omo/evidence/
+.omo/quarantine/
+.omo/run-continuation/
+.omo/start-work/
+.omo/boulder.json
+.codegraph/
+__pycache__/
+*.py[cod]
+.env
+.venv

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Rubbish Cleaner"
+  short_description: "Scan a drive for junk files and clean them safely with approval"
+  default_prompt: "Use $rubbish-cleaner to scan <drive> for junk files (temp, caches, logs, empty dirs) and clean them safely."
+policy:
+  allow_implicit_invocation: true

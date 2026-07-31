@@ -1,0 +1,4 @@
+# rubbish-cleaner - dependency manifest
+# No Python runtime dependencies: the skill is Windows PowerShell 5.1 (built-in).
+# Optional dev dependency for tests (auto-detected; skipped when absent):
+#   Install-Module Pester -Scope CurrentUser -Force -MinimumVersion 5.0
