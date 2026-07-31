@@ -26,6 +26,27 @@
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------
+# Test-drive auto-detection (replaces the previously hardcoded -Drive D:).
+# Picks the first fixed drive with used space on Windows, '/' elsewhere.
+# ---------------------------------------------------------------------
+. (Join-Path $PSScriptRoot '../../scripts/lib/platform.ps1')
+if ($script:IsWindows) {
+    $script:TestDrive = ((Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -gt 0 -and $_.Root -match '^[A-Z]:\\$' } | Select-Object -First 1).Root).TrimEnd('\')
+} else {
+    $script:TestDrive = '/'
+}
+if (-not $script:TestDrive) { $script:TestDrive = 'C:' }
+if ($script:IsWindows) {
+    $probePath = $script:TestDrive.TrimEnd(':') + ':\'
+} else {
+    $probePath = '/'
+}
+if (-not (Test-Path -LiteralPath $probePath)) {
+    Write-Output 'SKIP: no fixed drive available for test fixtures'
+    exit 0
+}
+
+# ---------------------------------------------------------------------
 # Repo layout (all paths absolute; nothing is hardcoded to the machine).
 # ---------------------------------------------------------------------
 $script:RepoRoot          = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -335,7 +356,7 @@ $suite3 = {
     $candLines.Add(('empty-dirs|SAFE|{0}|0|0|delete' -f $nonEmptyTarget))
     [System.IO.File]::WriteAllLines($candCsv, $candLines.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
 
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:CleanDrivePath -Drive 'D:' -CandidatesCsv $candCsv -QuarantineDir (Join-Path $base 'q') -Yes | Out-Null
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:CleanDrivePath -Drive $script:TestDrive -CandidatesCsv $candCsv -QuarantineDir (Join-Path $base 'q') -Yes | Out-Null
     Assert-Equal 'clean-drive.ps1: exit code 0' 0 $LASTEXITCODE
     Assert-Equal 'clean-drive.ps1: empty dir REMOVED' $false (Test-Path -LiteralPath $emptyTarget)
     Assert-Equal 'clean-drive.ps1: non-empty dir SURVIVES' $true (Test-Path -LiteralPath $nonEmptyTarget -PathType Container)
@@ -370,7 +391,7 @@ $suite4 = {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
     # ---- preflight.txt ---------------------------------------------------
-    $baseline = [long](Get-Volume -DriveLetter 'D').SizeRemaining - 100000000
+    $baseline = [long](Get-Volume -DriveLetter $script:TestDrive.TrimEnd(':')).SizeRemaining - 100000000
     [System.IO.File]::WriteAllLines((Join-Path $runDir 'preflight.txt'), @("BASELINE_FREE_BYTES=$baseline"), $utf8NoBom)
 
     # ---- fixture paths ---------------------------------------------------
@@ -405,7 +426,7 @@ $suite4 = {
     [System.IO.File]::WriteAllLines((Join-Path $runDir 'candidates.csv'), $candLines, $utf8NoBom)
 
     # ---- run verify-report as a subprocess --------------------------------
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:VerifyReportPath -Drive 'D:' -RunDir $runDir | Out-Null
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:VerifyReportPath -Drive $script:TestDrive -RunDir $runDir | Out-Null
     Assert-Equal 'verify-report.ps1: exit code 0' 0 $LASTEXITCODE
 
     # ---- summary.md assertions --------------------------------------------
@@ -438,7 +459,7 @@ $suite4 = {
 # =====================================================================
 # Orchestration
 # =====================================================================
-Write-Output 'BRANCH: SANDBOX'
+Write-Output ("BRANCH: SANDBOX (test drive: {0})" -f $script:TestDrive)
 
 try {
     # ---- setup: dot-source the lib, then the REAL classification seam ----
