@@ -1,5 +1,7 @@
 # rubbish-cleaner
 
+[English](README.md) | [简体中文](README_zh.md)
+
 Drive-scoped junk cleanup skill: scan a drive for junk files (temp files, caches, logs, empty directories) and clean them safely with explicit approval. A lightweight skill callable from Claude Code, Codex, and opencode — no Python runtime dependencies, built on Windows PowerShell 5.1.
 
 The workflow is **scan → approve → clean → verify → report**: every deletion is quarantined (moved to a backup folder) instead of destroyed, and a verification report is generated so you can audit exactly what changed. Cleanup is per-drive and per-run-scoped, so it never touches anything outside the directory you point it at.
@@ -104,6 +106,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
   - **Pester 5.x not installed** → prints `BRANCH: SANDBOX` and delegates to the zero-dependency harness `tests/sandbox/run-sandbox-tests.ps1` (plain PowerShell asserts, same four suites, builds/cleans its own temp tree under `$env:TEMP\rubbish-cleaner-tests\<pid>`), propagating its exit code.
 
 Either way the same four behavior suites (scan classification, safe delete + quarantine, empty-dir detection, report fixture) are covered. Exit code 0 means all assertions passed.
+
+## Limitations & Roadmap
+
+### Current limitations
+
+- Windows-only: built on PowerShell 5.1; no pwsh 7 (PowerShell Core) or Linux/macOS support yet
+- Pester branch of the dual-mode tests: without Pester 5.x on the machine, only the syntax parse-check runs (the sandbox harness is the main execution path)
+- `-Drive D:` is hardcoded in the sandbox test fixtures (ReportFixture and the clean-gating suites); machines without a fixed D: drive need it parameterized
+- The verify-report "quarantine copy exists" assertion (report section 7) is skipped in sandbox tests (needs a real quarantine directory)
+- Junk detection relies on a static path map (per-app-path-map.md); cache paths need manual maintenance when apps update, and no registry uninstall-entry auto-discovery exists
+- Duplicate-archive detection only looks at the drive root (same-level same-name archive + extracted-dir pairs), does not recurse into subdirectories; no hash-level duplicate detection
+- No scheduled-task integration (Task Scheduler / cron); cleanup is manual or agent-triggered
+- No TTL/auto-purge for the quarantine directory (safety-first design; quarantined files are handled manually)
+- Fixed thresholds (e.g. the 7-day freshness rule); the CLI exposes no filter params like `-MinSizeMB` / `-MaxAgeDays`
+- Single-threaded PowerShell enumeration can be slow on large drives; no scan progress persistence or resume
+
+### Roadmap / next iterations
+
+- PowerShell 7 (pwsh) compatibility + cross-platform cache path support (Linux/macOS)
+- GitHub Actions CI (with Pester 5.x preinstalled) so the Pester branch actually runs in CI
+- Parameterize test fixtures (remove the hardcoded `-Drive D:`)
+- Config-driven taxonomy: user-editable JSON (categories, paths, age/size thresholds, per-user overrides)
+- CLI filter params: `-MinSizeMB` / `-MaxAgeDays` / dry-run report diff
+- Recursive duplicate detection + hash-level dedup suggestions
+- App path auto-discovery (read uninstall registry keys → derive per-app cache paths)
+- Task Scheduler integration: scheduled scans + policy profiles (safe/aggressive) + space-freed notifications
+- Quarantine management subcommands: list / restore / purge, or a TTL policy
+- HTML report rendering of summary.md for manual auditing
+- WSL awareness enhancements (extend the existing SKIP_WSL_REGISTERED handling to WSL distro temp-dir mounts)
+- Multi-drive batch mode (`-Drives D:,E:`) with long-scan progress / resume
 
 ## License
 
