@@ -154,7 +154,7 @@
   QA scenarios: happy: 3 installs + index updated; failure: copy error -> log + exit 1; CLASSIFICATION.md edit drifts from the spec (e.g. wrong stats) -> fix, Evidence `.omo/evidence/rubbish-cleaner/task-10.txt`
   Commit: `feat(install): install.ps1 + opencode index + README`
 
-- [ ] 11. Feature-branch full QA + push feature/rubbish-cleaner
+- [x] 11. Feature-branch full QA + push feature/rubbish-cleaner
   What to do / Must NOT do: Run `powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\run-tests.ps1` -> must exit 0 (record `BRANCH:` marker in evidence). Run the smoke scan (READ-ONLY): `powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\scan-drive.ps1 -Drive D: -Categories root-temps,root-logs` -> exit 0, candidates.csv + scan-report.json produced (this is the first real-drive exercise of the skill, inventory-only, nothing deleted). Confirm `git status --porcelain` is clean except untracked evidence under `.omo/` (gitignored). Then `git add -A` (only repo files; .omo/evidence stays untracked by gitignore), `git commit -m "feat: rubbish-cleaner skill v1"` (if any uncommitted change remains from todos 3-10 — each todo already committed, so this should be a no-op; if the working tree is already clean, skip the commit). `git push -u origin feature/rubbish-cleaner`. Verify `git ls-remote origin feature/rubbish-cleaner` returns the local HEAD sha. MUST NOT push to main, MUST NOT merge yet, MUST NOT delete anything on D: (scan is read-only), MUST NOT skip the tests even if they pass by inspection.
   Parallelization: Wave 7 | Blocked by: 8,9,10 | Blocks: 12
   References: user git convention (feature branch pushed to origin, D:\yugioh-workflow-rag\.git\config:14-17)
