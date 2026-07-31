@@ -2,6 +2,7 @@
 .omo/quarantine/
 .omo/run-continuation/
 .omo/start-work/
+.omo/notepads/
 .omo/boulder.json
 .codegraph/
 __pycache__/
