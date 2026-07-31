@@ -2,70 +2,60 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-Drive-scoped junk cleanup skill: scan a drive for junk files (temp files, caches, logs, empty directories) and clean them safely with explicit approval. A lightweight skill callable from Claude Code, Codex, and opencode — no Python runtime dependencies, built on Windows PowerShell 5.1.
+An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode.
 
-The workflow is **scan → approve → clean → verify → report**: every deletion is quarantined (moved to a backup folder) instead of destroyed, and a verification report is generated so you can audit exactly what changed. Cleanup is per-drive and per-run-scoped, so it never touches anything outside the directory you point it at.
+## Quick Start
 
-## Installation
+This is a skill for LLM agents, not a traditional CLI tool. You describe what to clean in plain language; the agent does the rest. Two ways to get started:
 
-Clone or copy the repo, then run the installer (no admin rights needed):
+**Way 1 (recommended): let the agent deploy it.** Clone (or download and unzip) the repo anywhere, then open your agent and simply type your request in the chat, for example:
+
+```
+/rubbish-cleaner Clean up drive D: - temp files and caches only, do NOT touch my installers or game saves
+```
+
+The agent reads SKILL.md and deploys the skill itself, running `scripts\install.ps1` if it is not yet installed (no manual steps needed). It then follows the built-in scan → approve → clean → verify → report flow, shows you the candidate list, and asks for your confirmation before deleting anything.
+
+**Way 2: manual install (optional).** One command, no admin needed, idempotent:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\install.ps1
 ```
 
-The installer copies the whole skill (SKILL.md, scripts/, references/, agents/, tests/, README.md, LICENSE, requirements.txt — everything except `.git`, `.omo`, `.codegraph`) to the target platform directory. It is idempotent: re-running overwrites existing copies. `-Target` selects the platform (`all` | `claude` | `codex` | `opencode`, default `all`).
+`-Target all|claude|codex|opencode` selects the platform (default `all`). It installs to `%USERPROFILE%\.claude\skills\rubbish-cleaner\`, `%USERPROFILE%\.codex\skills\rubbish-cleaner\` and `%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\`.
 
-### Claude Code
+## Use it with your agent
 
-Installed to:
+Invocation: type `/rubbish-cleaner` in opencode or Claude Code (a slash command); Codex triggers the skill via its display name. Append your requirement in plain language. The skill's trigger words (junk cleanup / drive cleanup / cache cleanup / clean temp files) also auto-activate it.
 
-```
-%USERPROFILE%\.claude\skills\rubbish-cleaner\
-```
+What you can specify in your prompt (the skill maps these to its scan/clean parameters):
 
-### Codex
+- Target drive, e.g. `D:`
+- Categories to include or exclude (for example: keep installers, keep the recycle bin)
+- Paths or folders to never touch
+- Recency threshold in days (default: 7-day rule)
+- Whether to only scan (dry-run) or also clean
 
-Installed to:
+Prompt examples:
 
-```
-%USERPROFILE%\.codex\skills\rubbish-cleaner\
-```
+1. `/rubbish-cleaner Scan drive C: and show me what can be freed. Do not delete anything yet.`
+2. `/rubbish-cleaner Clean drive D: - remove temp files and app caches older than 30 days, but skip anything in D:\Downloads and D:\Games.`
+3. `/rubbish-cleaner What junk is on E:? Only list browser caches and logs.`
 
-### opencode
+The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; locked files are skipped) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`).
 
-Installed to:
+Safety: everything is per-drive and per-run scoped; nothing is permanently deleted (quarantined); each deletion is re-verified right before it happens; junction-aware; UAC-elevated system cleanup is optional and skip-if-denied.
 
-```
-%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\
-```
+## What it cleans
 
-## Usage
+The full taxonomy lives in `references/junk-taxonomy.md` and the per-app path map in `references/per-app-path-map.md`. In short: root temp files and logs, duplicate archives, empty directories, the recycle bin (with approval), and per-app caches (anaconda, WeGame, WeChat, Steam leftovers, ...). On the system drive it also covers browser/GPU/pip/npm/IDE caches, crash dumps and thumbnails, plus an optional elevated system batch (Windows\Temp, Prefetch, SoftwareDistribution, CBS, DISM /StartComponentCleanup). It never touches user documents, installed programs, or system component stores.
 
-Run the four phases in order, replacing `X:` with the target drive and `<run>` with the run ID printed by the scan (a timestamp, e.g. `20260731-153000`):
-
-```powershell
-# 1. Scan (READ-ONLY): inventories junk candidates into candidates.csv + scan-report.json
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\scan-drive.ps1 -Drive X:
-
-# 2. Review the candidates before approving anything
-#    (open candidates.csv / scan-report.json and eyeball the listed items)
-
-# 3. Clean (approval-gated): quarantines approved candidates to a backup dir
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\clean-drive.ps1 -Drive X: -Yes
-
-# 4. Verify + report: confirms the drive state and writes verify-report
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\verify-report.ps1 -Drive X: -RunDir <run>
-```
-
-Nothing is deleted on step 1 — scanning is inventory-only. Step 3 requires the explicit `-Yes` flag and quarantines rather than deletes, so anything you regret can be restored from the backup directory.
-
-## Project Structure
+## Project structure
 
 ```
 rubbish-cleaner/
 ├── SKILL.md                            # Skill core (progressive disclosure)
-├── README.md                           # This file
+├── README.md / README_zh.md            # EN/ZH docs (this file)
 ├── LICENSE                             # MIT
 ├── requirements.txt                    # Dependency note (no third-party runtime deps)
 ├── agents/
