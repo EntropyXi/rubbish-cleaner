@@ -6,7 +6,7 @@ Drive-scoped junk cleanup skill: scan a drive for junk files (temp files, caches
 
 The workflow is **scan → approve → clean → verify → report**: every deletion is quarantined (moved to a backup folder) instead of destroyed, and a verification report is generated so you can audit exactly what changed. Cleanup is per-drive and per-run-scoped, so it never touches anything outside the directory you point it at.
 
-## 安装
+## Installation
 
 Clone or copy the repo, then run the installer (no admin rights needed):
 
@@ -40,7 +40,7 @@ Installed to:
 %USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\
 ```
 
-## 使用
+## Usage
 
 Run the four phases in order, replacing `X:` with the target drive and `<run>` with the run ID printed by the scan (a timestamp, e.g. `20260731-153000`):
 
@@ -60,39 +60,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\
 
 Nothing is deleted on step 1 — scanning is inventory-only. Step 3 requires the explicit `-Yes` flag and quarantines rather than deletes, so anything you regret can be restored from the backup directory.
 
-## 文件结构
+## Project Structure
 
 ```
 rubbish-cleaner/
-├── SKILL.md                            # Skill 核心（渐进式披露）
-├── README.md                           # 本文件
+├── SKILL.md                            # Skill core (progressive disclosure)
+├── README.md                           # This file
 ├── LICENSE                             # MIT
-├── requirements.txt                    # 依赖说明（无第三方运行时依赖）
+├── requirements.txt                    # Dependency note (no third-party runtime deps)
 ├── agents/
-│   └── openai.yaml                     # Codex UI 元数据，Claude Code 可忽略
+│   └── openai.yaml                     # Codex UI metadata; ignored by Claude Code
 ├── scripts/
-│   ├── install.ps1                     # 一键安装到三平台 skill 目录
-│   ├── scan-drive.ps1                  # 只读扫描 + 分类（阶段 1）
-│   ├── clean-drive.ps1                 # 审批门控清理 + 隔离（阶段 3）
-│   ├── verify-report.ps1               # 校验 + 汇总报告（阶段 4）
+│   ├── install.ps1                     # One-command installer to all 3 platform skill dirs
+│   ├── scan-drive.ps1                  # Read-only scan + classification (phase 1)
+│   ├── clean-drive.ps1                 # Approval-gated cleanup + quarantine (phase 3)
+│   ├── verify-report.ps1               # Verify + summary report (phase 4)
 │   └── lib/
-│       └── rubbish-core.ps1            # 安全函数库（分类/隔离/报告）
+│       └── rubbish-core.ps1            # Safety function library (classify/quarantine/report)
 ├── references/
-│   ├── junk-taxonomy.md                # 垃圾文件分类法
-│   ├── per-app-path-map.md             # 常见应用缓存/临时路径映射
-│   └── safety-rules.md                 # 安全规则与排除清单
+│   ├── junk-taxonomy.md                # Junk file taxonomy
+│   ├── per-app-path-map.md             # Common app cache/temp path map
+│   └── safety-rules.md                 # Safety rules & exclusion list
 └── tests/
-    ├── run-tests.ps1                   # 双模式测试入口
+    ├── run-tests.ps1                   # Dual-mode test entry point
     ├── unit/
-    │   ├── scan.Tests.ps1              # Pester 5 单元测试（扫描分类）
-    │   ├── clean.Tests.ps1             # Pester 5 单元测试（安全删除+隔离）
-    │   ├── core.Tests.ps1              # Pester 5 单元测试（核心库）
-    │   └── report.Tests.ps1            # Pester 5 单元测试（报告）
+    │   ├── scan.Tests.ps1              # Pester 5 unit tests (scan classification)
+    │   ├── clean.Tests.ps1             # Pester 5 unit tests (safe delete + quarantine)
+    │   ├── core.Tests.ps1              # Pester 5 unit tests (core library)
+    │   └── report.Tests.ps1            # Pester 5 unit tests (report)
     └── sandbox/
-        └── run-sandbox-tests.ps1       # 零依赖回退 harness（无 Pester 时）
+        └── run-sandbox-tests.ps1       # Zero-dependency fallback harness (no Pester)
 ```
 
-## 测试
+## Testing
 
 The test suite is **dual-mode** and conditionally picks its runner:
 
