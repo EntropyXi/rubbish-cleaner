@@ -1,73 +1,61 @@
 # rubbish-cleaner
 
-跨 Agent 的磁盘垃圾清理技能
-
 [English](README.md) | [简体中文](README_zh.md)
 
-面向磁盘范围的垃圾清理技能：扫描磁盘上的垃圾文件（临时文件、缓存、日志、空目录），并在显式批准后安全清理。这是一个轻量级技能，可从 Claude Code、Codex 和 opencode 调用，无 Python 运行时依赖，基于 Windows PowerShell 5.1 构建。
+一个可被 Claude Code / Codex / opencode 调用的磁盘垃圾清理技能。
 
-工作流是 **扫描 → 批准 → 清理 → 校验 → 报告**：每一次删除都会被隔离（移动到备份目录）而不是直接销毁，同时生成一份校验报告，方便你审计到底改动了什么。清理按磁盘、按运行批次隔离作用域，绝不会触碰你指定的目录之外的内容。
+## 快速开始
 
-## 安装
+这是给 LLM agent 使用的技能，不是传统 CLI 工具。你用大白话描述要清理什么，agent 负责干活。有两种开始方式：
 
-克隆或复制本仓库，然后运行安装脚本（无需管理员权限）：
+**方式 1（推荐）：让 agent 帮你部署。** 把仓库克隆（或下载并解压）到任意位置，然后打开你的 agent，直接在对话里输入你的请求，例如：
+
+```
+/rubbish-cleaner 清理 D 盘的临时文件和缓存，不要动我的安装包和游戏存档
+```
+
+agent 会读取 SKILL.md 并自行部署技能（如果还没安装，它会自己运行 `scripts\install.ps1`，无需任何手动步骤），然后按内置的 扫描 → 批准 → 清理 → 校验 → 报告 流程执行，向你展示候选清单，并在删除任何东西之前征求你的确认。
+
+**方式 2：手动安装（可选）。** 一条命令，无需管理员权限，可重复执行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\install.ps1
 ```
 
-安装脚本会把整个技能（SKILL.md、scripts/、references/、agents/、tests/、README.md、LICENSE、requirements.txt，除了 `.git`、`.omo`、`.codegraph` 之外的所有内容）复制到目标平台目录。脚本是幂等的：重复运行会覆盖已有副本。`-Target` 用于选择平台（`all` | `claude` | `codex` | `opencode`，默认 `all`）。
+`-Target all|claude|codex|opencode` 用于选择平台（默认 `all`）。会安装到 `%USERPROFILE%\.claude\skills\rubbish-cleaner\`、`%USERPROFILE%\.codex\skills\rubbish-cleaner\` 和 `%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\`。
 
-### Claude Code
+## 在 agent 中使用
 
-安装到：
+调用方式：在 opencode 或 Claude Code 中输入 `/rubbish-cleaner`（斜杠命令）；Codex 通过它的技能显示名称触发。然后用大白话附上你的需求。技能的触发词（垃圾清理 / 清理垃圾 / 磁盘清理 / 盘符清理 / junk cleanup / drive cleanup / cache cleanup / clean temp files）也会自动激活它。
 
-```
-%USERPROFILE%\.claude\skills\rubbish-cleaner\
-```
+你可以在提示词里指定这些内容（技能会映射到扫描/清理参数）：
 
-### Codex
+- 目标盘符，例如 `D:`
+- 要包含或排除的类别（例如：不删安装包、不删回收站）
+- 绝不触碰的路径或文件夹（不删哪些）
+- 按天数指定的时效阈值（指定天数，默认 7 天规则）
+- 只扫描（dry-run）还是也执行清理
 
-安装到：
+提示词示例：
 
-```
-%USERPROFILE%\.codex\skills\rubbish-cleaner\
-```
+1. `/rubbish-cleaner 扫描 C 盘，列出可以释放空间的项目，先不要删除任何东西。`
+2. `/rubbish-cleaner 清理 D 盘：删除超过 30 天的临时文件和缓存，但跳过 D:\Downloads 和 D:\Games 里的任何内容。`
+3. `/rubbish-cleaner 看看 E 盘有什么垃圾？只要列出浏览器缓存和日志就行。`
 
-### opencode
+agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分类候选清单 → 等待你批准 → 安全清理（隔离 = 移动到备份目录，绝不永久删除；被占用的文件会跳过）→ 校验并写入汇总报告（`.omo\evidence\rubbish-cleaner\` 运行目录下的 `summary.md`）。
 
-安装到：
+安全要点：一切按盘符、按运行批次隔离作用域；没有任何东西被永久删除（全部隔离）；每次删除前都会重新校验；支持 junction 感知；UAC 提升的系统清理是可选的，拒绝即跳过。
 
-```
-%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\
-```
+## 清理范围
 
-## 使用
-
-按顺序执行四个阶段，把 `X:` 替换为目标磁盘，把 `<run>` 替换为扫描输出的运行 ID（一个时间戳，例如 `20260731-153000`）：
-
-```powershell
-# 1. 扫描（只读）：把垃圾候选清单写入 candidates.csv + scan-report.json
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\scan-drive.ps1 -Drive X:
-
-# 2. 批准前先人工复核候选清单
-#    （打开 candidates.csv / scan-report.json，逐一过目列出的条目）
-
-# 3. 清理（受批准门控）：把获批的候选隔离到备份目录
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\clean-drive.ps1 -Drive X: -Yes
-
-# 4. 校验 + 报告：确认磁盘状态并写入 verify-report
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\scripts\verify-report.ps1 -Drive X: -RunDir <run>
-```
-
-第 1 步不会删除任何内容，扫描只做清单盘点。第 3 步需要显式的 `-Yes` 参数，并且是隔离而非删除，所以任何清理后悔的东西都可以从备份目录中恢复。
+完整分类见 `references/junk-taxonomy.md`，各应用路径见 `references/per-app-path-map.md`。简单来说：盘根临时文件与日志、重复压缩包、空目录、回收站（需批准）、各应用缓存（anaconda、WeGame、微信、Steam 残留等）；在系统盘上还包括浏览器/GPU/pip/npm/IDE 缓存、崩溃转储、缩略图，以及可选的高权限系统批次（Windows\Temp、Prefetch、SoftwareDistribution、CBS、DISM /StartComponentCleanup）。绝不触碰用户文档、已安装程序、系统组件存储。
 
 ## 文件结构
 
 ```
 rubbish-cleaner/
 ├── SKILL.md                            # Skill 核心（渐进式披露）
-├── README.md                           # 本文件
+├── README.md / README_zh.md            # 中英文文档（本文件）
 ├── LICENSE                             # MIT
 ├── requirements.txt                    # 依赖说明（无第三方运行时依赖）
 ├── agents/
