@@ -162,7 +162,7 @@
   QA scenarios: happy: tests pass, scan smoke works, feature pushed; failure: push rejected (remote drift) -> pull --rebase origin main then push again; tests fail -> fix and re-run before push, Evidence `.omo/evidence/rubbish-cleaner/task-11.txt`
   Commit: the push of `feat: rubbish-cleaner skill v1` (already committed per todo)
 
-- [ ] 12. Merge feature into main + push main
+- [x] 12. Merge feature into main + push main
   What to do / Must NOT do: `git checkout main`; `git merge --no-ff feature/rubbish-cleaner -m "Merge feature/rubbish-cleaner: rubbish-cleaner skill v1"`; resolve conflicts if any (none expected — main has only the scaffold commit); `git push origin main`; verify `git ls-remote origin main` == local `git rev-parse HEAD`. Keep the feature branch (user convention keeps feature branches on origin — do NOT delete). MUST NOT squash (user convention is direct merge), MUST NOT force-push, MUST NOT commit anything else to main — if the F1-F4 wave later surfaces a CRITICAL finding after main is pushed, fix it on `feature/rubbish-cleaner`, re-merge with `--no-ff`, and re-push main (main is only ever updated via feature-branch merges).
   Parallelization: Wave 8 | Blocked by: 11 | Blocks: F1-F4
   References: user convention D:\yugioh-workflow-rag\.git\config:11-17 (main + feature both on origin)
