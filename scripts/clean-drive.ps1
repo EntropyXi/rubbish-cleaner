@@ -354,7 +354,7 @@ if ($driveGiven -and $drivesGiven) {
     exit 1
 }
 if ($Parallel.IsPresent) {
-    Write-Output "parallel clean is disabled for safety — cleaning drives sequentially"
+    Write-Output "parallel clean is disabled for safety - cleaning drives sequentially"
 }
 
 if ($drivesGiven) {
