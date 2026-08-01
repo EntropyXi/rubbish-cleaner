@@ -16,7 +16,7 @@
 /rubbish-cleaner 清理 D 盘的临时文件和缓存，不要动我的安装包和游戏存档
 ```
 
-agent 会读取 SKILL.md 并自行部署技能（如果还没安装，它会自己运行 `scripts\install.ps1`，无需任何手动步骤），然后按内置的 扫描 → 批准 → 清理 → 校验 → 报告 流程执行，向你展示候选清单，并在删除任何东西之前征求你的确认。
+agent 会读取 [SKILL.md](SKILL.md) 并自行部署技能（如果还没安装，它会自己运行 `scripts\install.ps1`，无需任何手动步骤），然后按内置的 扫描 → 批准 → 清理 → 校验 → 报告 流程执行，向你展示候选清单，并在删除任何东西之前征求你的确认。
 
 **方式 2：手动安装（可选）。** 一条命令，无需管理员权限，可重复执行：
 
@@ -50,7 +50,7 @@ agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分�
 
 ## 清理范围
 
-完整分类见 `references/junk-taxonomy.md`，各应用路径见 `references/per-app-path-map.md`。简单来说：盘根临时文件与日志、重复压缩包、空目录、回收站（需批准）、各应用缓存（anaconda、WeGame、微信、Steam 残留等）；在系统盘上还包括浏览器/GPU/pip/npm/IDE 缓存、崩溃转储、缩略图，以及可选的高权限系统批次（Windows\Temp、Prefetch、SoftwareDistribution、CBS、DISM /StartComponentCleanup）。绝不触碰用户文档、已安装程序、系统组件存储。
+完整分类见 [junk-taxonomy.md](references/junk-taxonomy.md)，各应用路径见 [per-app-path-map.md](references/per-app-path-map.md)。简单来说：盘根临时文件与日志、重复压缩包、空目录、回收站（需批准）、各应用缓存（anaconda、WeGame、微信、Steam 残留等）；在系统盘上还包括浏览器/GPU/pip/npm/IDE 缓存、崩溃转储、缩略图，以及可选的高权限系统批次（Windows\Temp、Prefetch、SoftwareDistribution、CBS、DISM /StartComponentCleanup）。绝不触碰用户文档、已安装程序、系统组件存储。
 
 ## 文件结构
 
@@ -105,7 +105,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
 - ✅ ~~双模式测试的 Pester 分支：本机无 Pester 5.x 时只能做语法解析校验（sandbox harness 是主执行路径）~~ —— GitHub Actions CI 现已预装 Pester 5.x 运行该分支
 - ✅ ~~沙盒测试夹具中硬编码了 `-Drive D:`（ReportFixture 与清理门控套件），无固定 D 盘的机器需参数化~~ —— 夹具现已自动探测测试盘（Windows 取首个固定盘，其他平台用 `/`）
 - verify-report 的"隔离副本存在"断言（报告第 7 节）在沙盒测试中被跳过（需真实隔离目录）
-- 垃圾识别基于静态路径映射（per-app-path-map.md），应用更新缓存路径后需人工维护；未做注册表卸载项自动发现
+- 垃圾识别基于静态路径映射（[per-app-path-map.md](references/per-app-path-map.md)），应用更新缓存路径后需人工维护；未做注册表卸载项自动发现
 - 重复压缩包检测仅限盘根（同层同名压缩包+解压目录对），不递归子目录；无哈希级重复文件检测
 - 无定时任务集成（任务计划程序/cron）；清理为手动或 agent 触发
 - 隔离目录无 TTL/自动清理（安全优先的设计，隔离文件需手动处理）

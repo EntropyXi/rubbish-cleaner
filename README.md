@@ -16,7 +16,7 @@ This is a skill for LLM agents, not a traditional CLI tool. You describe what to
 /rubbish-cleaner Clean up drive D: - temp files and caches only, do NOT touch my installers or game saves
 ```
 
-The agent reads SKILL.md and deploys the skill itself, running `scripts\install.ps1` if it is not yet installed (no manual steps needed). It then follows the built-in scan → approve → clean → verify → report flow, shows you the candidate list, and asks for your confirmation before deleting anything.
+The agent reads [SKILL.md](SKILL.md) and deploys the skill itself, running `scripts\install.ps1` if it is not yet installed (no manual steps needed). It then follows the built-in scan → approve → clean → verify → report flow, shows you the candidate list, and asks for your confirmation before deleting anything.
 
 **Way 2: manual install (optional).** One command, no admin needed, idempotent:
 
@@ -50,7 +50,7 @@ Safety: everything is per-drive and per-run scoped; nothing is permanently delet
 
 ## What it cleans
 
-The full taxonomy lives in `references/junk-taxonomy.md` and the per-app path map in `references/per-app-path-map.md`. In short: root temp files and logs, duplicate archives, empty directories, the recycle bin (with approval), and per-app caches (anaconda, WeGame, WeChat, Steam leftovers, ...). On the system drive it also covers browser/GPU/pip/npm/IDE caches, crash dumps and thumbnails, plus an optional elevated system batch (Windows\Temp, Prefetch, SoftwareDistribution, CBS, DISM /StartComponentCleanup). It never touches user documents, installed programs, or system component stores.
+The full taxonomy lives in [junk-taxonomy.md](references/junk-taxonomy.md) and the per-app path map in [per-app-path-map.md](references/per-app-path-map.md). In short: root temp files and logs, duplicate archives, empty directories, the recycle bin (with approval), and per-app caches (anaconda, WeGame, WeChat, Steam leftovers, ...). On the system drive it also covers browser/GPU/pip/npm/IDE caches, crash dumps and thumbnails, plus an optional elevated system batch (Windows\Temp, Prefetch, SoftwareDistribution, CBS, DISM /StartComponentCleanup). It never touches user documents, installed programs, or system component stores.
 
 ## Project structure
 
@@ -107,7 +107,7 @@ Either way the same four behavior suites (scan classification, safe delete + qua
 - ✅ ~~Pester branch of the dual-mode tests: without Pester 5.x on the machine, only the syntax parse-check runs (the sandbox harness is the main execution path)~~ — GitHub Actions CI now runs the Pester branch with Pester 5.x preinstalled
 - ✅ ~~`-Drive D:` is hardcoded in the sandbox test fixtures (ReportFixture and the clean-gating suites); machines without a fixed D: drive need it parameterized~~ — fixtures now auto-detect a test drive (first fixed drive on Windows, `/` elsewhere)
 - The verify-report "quarantine copy exists" assertion (report section 7) is skipped in sandbox tests (needs a real quarantine directory)
-- Junk detection relies on a static path map (per-app-path-map.md); cache paths need manual maintenance when apps update, and no registry uninstall-entry auto-discovery exists
+- Junk detection relies on a static path map ([per-app-path-map.md](references/per-app-path-map.md)); cache paths need manual maintenance when apps update, and no registry uninstall-entry auto-discovery exists
 - Duplicate-archive detection only looks at the drive root (same-level same-name archive + extracted-dir pairs), does not recurse into subdirectories; no hash-level duplicate detection
 - No scheduled-task integration (Task Scheduler / cron); cleanup is manual or agent-triggered
 - No TTL/auto-purge for the quarantine directory (safety-first design; quarantined files are handled manually)

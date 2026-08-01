@@ -15,7 +15,7 @@
   - `scripts/scan-drive.ps1`：只读磁盘扫描 + 垃圾分类。
   - `scripts/clean-drive.ps1`：需批准的带隔离机制的安全清理。
   - `scripts/verify-report.ps1`：清理后验证 + 摘要报告。
-- 参考资料：`references/junk-taxonomy.md`、`references/safety-rules.md`、`references/per-app-path-map.md`。
+- 参考资料：[junk-taxonomy.md](references/junk-taxonomy.md)、[safety-rules.md](references/safety-rules.md)、[per-app-path-map.md](references/per-app-path-map.md)。
 - 双模式测试套件：零依赖沙箱测试（`tests/sandbox/run-sandbox-tests.ps1`）与 Pester 5 单元测试（`tests/unit/`）。
 - [install.ps1](scripts/install.ps1)：一键安装脚本；技能安装到 Claude Code、Codex 与 opencode 技能目录，并更新 opencode 技能索引（外部配置）。
 

@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scripts/scan-drive.ps1`: read-only drive scan + junk classification.
   - `scripts/clean-drive.ps1`: approval-gated safe cleanup with quarantine.
   - `scripts/verify-report.ps1`: post-clean verification + summary report.
-- References: `references/junk-taxonomy.md`, `references/safety-rules.md`, `references/per-app-path-map.md`.
+- References: [junk-taxonomy.md](references/junk-taxonomy.md), [safety-rules.md](references/safety-rules.md), [per-app-path-map.md](references/per-app-path-map.md).
 - Dual-mode test suite: zero-dependency sandbox harness (`tests/sandbox/run-sandbox-tests.ps1`) and Pester 5 unit tests (`tests/unit/`).
 - [install.ps1](scripts/install.ps1): one-command installer; the skill is installed into the Claude Code, Codex and opencode skill directories, and the opencode skill index is updated (external config).
 
