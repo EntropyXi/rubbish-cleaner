@@ -124,3 +124,14 @@ verify-report.ps1 的 `## 5. Skipped Items Table` 按此枚举计数；任何 SK
 - **NO force-kill**——绝不 `Stop-Process -Force` 来解锁文件；锁定即跳过并记录。
 - **NO `powercfg /h off`**、**NO 裸 `-Recurse`**、**NO `Clear-RecycleBin`**
   （回收站只报告，除非用户单独手动批准）。
+
+## 12. 跨平台注意事项
+
+- **Linux/macOS 无 UAC/提升**：`elevated-system` 的 UAC 提升（`Start-Process -Verb RunAs`）
+  是 Windows 专属。在 Linux/macOS 上不弹提升框，直接记 `SKIP_ELEVATION_DENIED`
+  并**静默跳过**，其余清理逻辑不受影响。
+- **隔离目录位置**：Windows 用 `$env:USERPROFILE\Desktop`，其他平台改用
+  `Get-UserDocumentsDir`（见 `scripts/lib/platform.ps1`）解析用户文档目录，
+  保证隔离目录始终落在可恢复的用户目录下。
+- **elevated-system 仅 Windows**：Windows 上仅系统盘 + `-Yes` 时真正执行提升批次；
+  在其他平台该分支**永远不执行**（静默跳过），不产生 elevated.ps1。

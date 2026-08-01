@@ -1,5 +1,7 @@
 # rubbish-cleaner
 
+![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
+
 [English](README.md) | [简体中文](README_zh.md)
 
 An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode.
@@ -101,22 +103,22 @@ Either way the same four behavior suites (scan classification, safe delete + qua
 
 ### Current limitations
 
-- Windows-only: built on PowerShell 5.1; no pwsh 7 (PowerShell Core) or Linux/macOS support yet
-- Pester branch of the dual-mode tests: without Pester 5.x on the machine, only the syntax parse-check runs (the sandbox harness is the main execution path)
-- `-Drive D:` is hardcoded in the sandbox test fixtures (ReportFixture and the clean-gating suites); machines without a fixed D: drive need it parameterized
+- ✅ ~~Windows-only: built on PowerShell 5.1; no pwsh 7 (PowerShell Core) or Linux/macOS support yet~~ — now runs on Windows (PS 5.1 + pwsh 7) and Linux/macOS (pwsh 7); see [SKILL.md](SKILL.md) `平台支持`
+- ✅ ~~Pester branch of the dual-mode tests: without Pester 5.x on the machine, only the syntax parse-check runs (the sandbox harness is the main execution path)~~ — GitHub Actions CI now runs the Pester branch with Pester 5.x preinstalled
+- ✅ ~~`-Drive D:` is hardcoded in the sandbox test fixtures (ReportFixture and the clean-gating suites); machines without a fixed D: drive need it parameterized~~ — fixtures now auto-detect a test drive (first fixed drive on Windows, `/` elsewhere)
 - The verify-report "quarantine copy exists" assertion (report section 7) is skipped in sandbox tests (needs a real quarantine directory)
 - Junk detection relies on a static path map (per-app-path-map.md); cache paths need manual maintenance when apps update, and no registry uninstall-entry auto-discovery exists
 - Duplicate-archive detection only looks at the drive root (same-level same-name archive + extracted-dir pairs), does not recurse into subdirectories; no hash-level duplicate detection
 - No scheduled-task integration (Task Scheduler / cron); cleanup is manual or agent-triggered
 - No TTL/auto-purge for the quarantine directory (safety-first design; quarantined files are handled manually)
 - Fixed thresholds (e.g. the 7-day freshness rule); the CLI exposes no filter params like `-MinSizeMB` / `-MaxAgeDays`
-- Single-threaded PowerShell enumeration can be slow on large drives; no scan progress persistence or resume
+- ✅ ~~Single-threaded PowerShell enumeration can be slow on large drives; no scan progress persistence or resume~~ — multi-drive batch (`-Drives D:,E:`) plus `-Resume` checkpoint/resume is now built in
 
 ### Roadmap / next iterations
 
-- PowerShell 7 (pwsh) compatibility + cross-platform cache path support (Linux/macOS)
-- GitHub Actions CI (with Pester 5.x preinstalled) so the Pester branch actually runs in CI
-- Parameterize test fixtures (remove the hardcoded `-Drive D:`)
+- ✅ ~~PowerShell 7 (pwsh) compatibility + cross-platform cache path support (Linux/macOS)~~ — delivered via `scripts/lib/platform.ps1`
+- ✅ ~~GitHub Actions CI (with Pester 5.x preinstalled) so the Pester branch actually runs in CI~~ — delivered via `.github/workflows/test.yml`
+- ✅ ~~Parameterize test fixtures (remove the hardcoded `-Drive D:`)~~ — delivered (fixtures auto-detect a test drive)
 - Config-driven taxonomy: user-editable JSON (categories, paths, age/size thresholds, per-user overrides)
 - CLI filter params: `-MinSizeMB` / `-MaxAgeDays` / dry-run report diff
 - Recursive duplicate detection + hash-level dedup suggestions
@@ -125,7 +127,7 @@ Either way the same four behavior suites (scan classification, safe delete + qua
 - Quarantine management subcommands: list / restore / purge, or a TTL policy
 - HTML report rendering of summary.md for manual auditing
 - WSL awareness enhancements (extend the existing SKIP_WSL_REGISTERED handling to WSL distro temp-dir mounts)
-- Multi-drive batch mode (`-Drives D:,E:`) with long-scan progress / resume
+- ✅ ~~Multi-drive batch mode (`-Drives D:,E:`) with long-scan progress / resume~~ — delivered (`-Drives C:,D:` + `-Resume`)
 
 ## License
 

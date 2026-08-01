@@ -9,6 +9,8 @@ description: >
 
 # rubbish-cleaner
 
+![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
+
 扫描指定驱动器，对垃圾文件（临时文件、缓存、日志、空目录、重复压缩包、根目录可疑
 dll/exe 等）分类列出，经用户批准后**安全**清理，并产出验证报告。清理规则全部来自
 已实际执行验证过的 C 盘 / D 盘清理计划（详见 `references/junk-taxonomy.md` 的源流）。
@@ -29,6 +31,14 @@ dll/exe 等）分类列出，经用户批准后**安全**清理，并产出验�
 cd <skill-root>
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\scan-drive.ps1 -Drive X:
 ```
+
+## 平台支持
+
+- **Windows**：PowerShell 5.1（系统自带）与 pwsh 7 均支持。
+- **Linux / macOS**：需要 pwsh 7（PowerShell Core）——脚本不依赖 Windows 专属 cmdlet。
+- **PS 5.1 专属特性仅限 Windows**：`elevated-system`（UAC 提升清理，`-Yes` + 系统盘）
+  依赖 Windows UAC，在 Linux/macOS 上不弹提升框，直接记 `SKIP_ELEVATION_DENIED`
+  并**静默跳过**，其余清理照常进行。
 
 ## 2. 触发条件
 
@@ -71,6 +81,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-report.ps1 -D
 - `-SkipElevated`：只把 elevated.ps1 写入运行目录，**不弹 UAC**（测试/CI 安全）。
 - elevated-system 仅当用户盘 + `-Yes` 且在**系统盘**上才真正弹 UAC；拒绝即跳过并继续。
 - 未带 `-Yes` 时 ASK 分类（duplicate-archives、recycle-bin）整类跳过。
+- **多盘批量**：`-Drives C:,D:` 一次扫描/清理多个盘，各盘独立运行目录，
+  **顺序执行**（`-Parallel` 为安全考虑被忽略）。
+- **断点续扫/续清**：`-Resume` 从该盘运行目录里的 checkpoint 继续，已完成分类
+  不会重复处理（clean 侧跳过已清理行，scan 侧保留已有候选）。
+- **定时清理**：`scripts\schedule.ps1` 提供任务计划程序集成
+  （`-Action Register -Drive C: -Policy safe -Time 02:00`、`-Action List`、
+  `-Action Unregister`，支持安全/激进策略档）。
 
 ## 5. 分类与风险
 

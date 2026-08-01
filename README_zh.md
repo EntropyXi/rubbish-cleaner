@@ -1,5 +1,7 @@
 # rubbish-cleaner
 
+![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
+
 [English](README.md) | [简体中文](README_zh.md)
 
 一个可被 Claude Code / Codex / opencode 调用的磁盘垃圾清理技能。
@@ -99,22 +101,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
 
 ## 当前不足
 
-- Windows-only：基于 PowerShell 5.1，尚无 pwsh 7（PowerShell Core）与 Linux/macOS 支持
-- 双模式测试的 Pester 分支：本机无 Pester 5.x 时只能做语法解析校验（sandbox harness 是主执行路径）
-- 沙盒测试夹具中硬编码了 `-Drive D:`（ReportFixture 与清理门控套件），无固定 D 盘的机器需参数化
+- ✅ ~~Windows-only：基于 PowerShell 5.1，尚无 pwsh 7（PowerShell Core）与 Linux/macOS 支持~~ —— 现已支持 Windows（PS 5.1 + pwsh 7）与 Linux/macOS（pwsh 7），详见 [SKILL.md](SKILL.md) 的「平台支持」
+- ✅ ~~双模式测试的 Pester 分支：本机无 Pester 5.x 时只能做语法解析校验（sandbox harness 是主执行路径）~~ —— GitHub Actions CI 现已预装 Pester 5.x 运行该分支
+- ✅ ~~沙盒测试夹具中硬编码了 `-Drive D:`（ReportFixture 与清理门控套件），无固定 D 盘的机器需参数化~~ —— 夹具现已自动探测测试盘（Windows 取首个固定盘，其他平台用 `/`）
 - verify-report 的"隔离副本存在"断言（报告第 7 节）在沙盒测试中被跳过（需真实隔离目录）
 - 垃圾识别基于静态路径映射（per-app-path-map.md），应用更新缓存路径后需人工维护；未做注册表卸载项自动发现
 - 重复压缩包检测仅限盘根（同层同名压缩包+解压目录对），不递归子目录；无哈希级重复文件检测
 - 无定时任务集成（任务计划程序/cron）；清理为手动或 agent 触发
 - 隔离目录无 TTL/自动清理（安全优先的设计，隔离文件需手动处理）
 - 阈值固定（如 7 天新鲜度规则），CLI 未暴露 `-MinSizeMB` / `-MaxAgeDays` 之类过滤参数
-- 大磁盘单线程 PowerShell 枚举可能较慢，扫描无进度持久化/断点续扫
+- ✅ ~~大磁盘单线程 PowerShell 枚举可能较慢，扫描无进度持久化/断点续扫~~ —— 现已内置多盘批量（`-Drives D:,E:`）与 `-Resume` 断点续扫/续清
 
 ## 下一步迭代方向
 
-- PowerShell 7（pwsh）兼容 + 跨平台缓存路径支持（Linux/macOS）
-- GitHub Actions CI（预装 Pester 5.x）让 Pester 分支真正在 CI 中执行
-- 测试夹具参数化（去掉硬编码 `-Drive D:`）
+- ✅ ~~PowerShell 7（pwsh）兼容 + 跨平台缓存路径支持（Linux/macOS）~~ —— 已交付（`scripts/lib/platform.ps1`）
+- ✅ ~~GitHub Actions CI（预装 Pester 5.x）让 Pester 分支真正在 CI 中执行~~ —— 已交付（`.github/workflows/test.yml`）
+- ✅ ~~测试夹具参数化（去掉硬编码 `-Drive D:`）~~ —— 已交付（夹具自动探测测试盘）
 - 配置驱动分类法：用户可编辑 JSON（分类、路径、年龄/大小阈值、每用户覆盖）
 - CLI 过滤参数：`-MinSizeMB` / `-MaxAgeDays` / dry-run 报告对比
 - 递归重复检测 + 哈希级文件去重建议
@@ -123,7 +125,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
 - 隔离区管理子命令：list / restore / purge，或 TTL 策略
 - summary.md 的 HTML 报告渲染，便于人工审计
 - WSL 感知增强（已有 SKIP_WSL_REGISTERED 处置，扩展到 WSL 发行版临时目录挂载）
-- 多盘批量模式（`-Drives D:,E:`）与长扫描进度/断点续扫
+- ✅ ~~多盘批量模式（`-Drives D:,E:`）与长扫描进度/断点续扫~~ —— 已交付（`-Drives C:,D:` + `-Resume`）
 
 ## License
 
