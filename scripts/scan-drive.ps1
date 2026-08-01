@@ -1069,7 +1069,7 @@ if ($drivesGiven) {
 
     if ($Parallel.IsPresent) {
         # ---- concurrent per-drive subprocesses --------------------------
-        if ($script:IsCoreCLR) {
+        if ($script:IsPwsh7) {
             # pwsh 7: Start-Process -PassThru per drive, output redirected to
             # per-drive logs, then WaitForExit for all.
             $procs = New-Object System.Collections.Generic.List[object]

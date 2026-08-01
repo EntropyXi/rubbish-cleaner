@@ -10,7 +10,7 @@
 # children are skipped without descending.
 
 # Dot-source platform.ps1 (side-effect free) for the module-scoped
-# $script:IsCoreCLR flag used by Invoke-ParallelForEach to pick the pwsh 7
+# $script:IsPwsh7 flag used by Invoke-ParallelForEach to pick the pwsh 7
 # ForEach-Object -Parallel path vs the PS 5.1 Start-Job fallback.
 . (Join-Path $PSScriptRoot 'platform.ps1')
 
@@ -197,7 +197,7 @@ function Test-FileLocked {
 # every invocation are collected and returned in input order.
 #
 # Execution paths:
-#   * pwsh 7+ ($script:IsCoreCLR): native `ForEach-Object -Parallel` with
+#   * pwsh 7+ ($script:IsPwsh7): native `ForEach-Object -Parallel` with
 #     -ThrottleLimit. The user scriptblock is passed BY TEXT and re-created
 #     in each parallel runspace (runspaces cannot share live ScriptBlock
 #     objects), then invoked with the item as its first positional argument.
@@ -246,7 +246,7 @@ function Invoke-ParallelForEach {
                 [void]$errors.Add("Item '$item' failed: $($_.Exception.Message)")
             }
         }
-    } elseif ($script:IsCoreCLR) {
+    } elseif ($script:IsPwsh7) {
         # pwsh 7+: native ForEach-Object -Parallel. Scriptblock passed by text
         # (runspaces cannot share live ScriptBlock objects across boundaries).
         $sbText = $ScriptBlock.ToString()

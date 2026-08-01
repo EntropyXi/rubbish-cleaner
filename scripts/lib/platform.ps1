@@ -9,15 +9,15 @@
 #   $script:IsWin  - $true on Windows (PS 5.1 Desktop or Core)
 #   $script:IsLx   - $true on Linux
 #   $script:IsMac  - $true on macOS
-#   $script:IsCoreCLR - $true when running under PowerShell Core (pwsh 6+)
+#   $script:IsPwsh7 - $true when running under PowerShell Core (pwsh 6+)
 #
-# NAMING NOTE: the short names ($script:IsWin / IsLx / IsMac) are a deliberate
-# departure from the built-in pwsh automatic variables $IsWindows/$IsLinux/
-# $IsMacOS, which are READ-ONLY on pwsh 7: assigning to a script-scoped
-# variable named after them (IsWindows / IsLinux / IsMacOS) throws
-# SessionStateUnauthorizedAccessException at dot-source time. Never reintroduce
-# the full automatic-variable names as assignable script-scoped variables in
-# this file.
+# NAMING NOTE: the short names ($script:IsWin / IsLx / IsMac / IsPwsh7) are a
+# deliberate departure from the built-in pwsh automatic variables $IsWindows/
+# $IsLinux/$IsMacOS/$IsCoreCLR, which are READ-ONLY on pwsh 7: assigning to a
+# script-scoped variable named after them (IsWindows / IsLinux / IsMacOS /
+# IsCoreCLR) throws SessionStateUnauthorizedAccessException at dot-source time.
+# Never reintroduce the automatic-variable names as assignable script-scoped
+# variables in this file.
 #
 # Detection: pwsh 6+ has built-in $IsWindows/$IsLinux/$IsMacOS; PS 5.1
 # Desktop falls back to [System.Environment]::OSVersion.Platform (Win32NT =>
@@ -30,9 +30,9 @@
 $script:IsWin     = $false
 $script:IsLx      = $false
 $script:IsMac     = $false
-$script:IsCoreCLR = ($PSVersionTable.PSEdition -eq 'Core')
+$script:IsPwsh7   = ($PSVersionTable.PSEdition -eq 'Core')
 
-if ($script:IsCoreCLR) {
+if ($script:IsPwsh7) {
     # PowerShell Core (pwsh 6+): built-in booleans are authoritative.
     $script:IsWin = [bool]$IsWindows
     $script:IsLx  = [bool]$IsLinux
