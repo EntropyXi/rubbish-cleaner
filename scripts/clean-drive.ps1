@@ -53,7 +53,8 @@ param(
     [string]$QuarantineDir = "$env:USERPROFILE\Desktop\.omo\quarantine\$($Drive.TrimEnd(':'))",
     [switch]$Yes,                                                 # approve ASK categories + run the elevated batch (no prompts)
     [string[]]$Categories,                                        # filter; empty = all categories present in the CSV
-    [switch]$SkipElevated                                         # test/CI-safe: prepare <run>\elevated.ps1 but NEVER launch UAC
+    [switch]$SkipElevated,                                        # test/CI-safe: prepare <run>\elevated.ps1 but NEVER launch UAC
+    [switch]$Resume                                               # todo 4: resume from <run>\clean-checkpoint.json
 )
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
@@ -308,6 +309,29 @@ Add-Content -LiteralPath $result -Value "END=$(Get-Date -Format o)"
 }
 
 # =====================================================================
+# todo 4: clean checkpoint (<run>\clean-checkpoint.json).
+# Schema: {"completedCategories":[...],"lastCleanedRowIndex":N}. Written after
+# every completed category so a -Resume run can skip already-cleaned rows.
+# A write failure is caught and IGNORED: it must never abort the cleanup.
+# =====================================================================
+function Write-CleanCheckpoint {
+    param(
+        [string]$Path,
+        [System.Collections.Generic.List[string]]$Completed,
+        [int]$LastIndex
+    )
+    try {
+        $json = ConvertTo-Json -InputObject ([ordered]@{
+                completedCategories = @($Completed)
+                lastCleanedRowIndex = $LastIndex
+            })
+        [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {
+        Write-Warning "clean checkpoint write failed (continuing): $($_.Exception.Message)"
+    }
+}
+
+# =====================================================================
 # <begin-main>
 # =====================================================================
 
@@ -379,25 +403,67 @@ $rows = @(Import-Csv -LiteralPath $CandidatesCsv -Delimiter '|')
 # Normalize -Categories: accept both `-Categories a,b` and `-Categories "a,b"`.
 $catFilter = @($Categories | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
+# ---- todo 4: clean checkpoint + resume ----------------------------------
+# The checkpoint lives in the run dir next to candidates.csv. With -Resume it
+# must already exist (rows before lastCleanedRowIndex were cleaned by a
+# previous run and are skipped). Without -Resume the checkpoint is still
+# written after each completed category, just unused.
+$cleanCheckpointPath = Join-Path $runDir 'clean-checkpoint.json'
+$resumeState = $null
+if ($Resume.IsPresent) {
+    if (-not (Test-Path -LiteralPath $cleanCheckpointPath -PathType Leaf)) {
+        Write-Error "No checkpoint found for resume: $cleanCheckpointPath"
+        exit 1
+    }
+    $cjson = Get-Content -LiteralPath $cleanCheckpointPath -Raw | ConvertFrom-Json
+    $resumeState = @{
+        CompletedCategories = @($cjson.completedCategories)
+        LastCleanedRowIndex = if ($null -eq $cjson.lastCleanedRowIndex) { -1 } else { [int]$cjson.lastCleanedRowIndex }
+    }
+    Write-Output "RESUME: skipping $($resumeState.LastCleanedRowIndex) already-cleaned row(s) (checkpoint $cleanCheckpointPath)"
+}
+$skipUntil = if ($null -ne $resumeState) { $resumeState.LastCleanedRowIndex } else { -1 }
+$completedCats = New-Object System.Collections.Generic.List[string]
+if ($null -ne $resumeState) {
+    foreach ($c in $resumeState.CompletedCategories) { [void]$completedCats.Add([string]$c) }
+}
+
 # ---- Process categories -------------------------------------------------
 Write-Output "CLEANING $Drive (isUserDrive=$isUserDrive, isSystemDrive=$isSystemDrive, yes=$($Yes.IsPresent), skipElevated=$($SkipElevated.IsPresent))"
 Write-Output "CANDIDATES: $CandidatesCsv"
 Write-Output "RUN DIR: $runDir"
 
-$groups = @($rows | Group-Object Category)
-if ($groups.Count -eq 0) {
+# Rows get a global 0-based Index so resume can skip rows strictly before
+# lastCleanedRowIndex (the checkpoint is written after each completed category).
+$indexedRows = New-Object System.Collections.Generic.List[object]
+for ($i = 0; $i -lt $rows.Count; $i++) { $indexedRows.Add([pscustomobject]@{ Index = $i; Row = $rows[$i] }) }
+$groups = @($indexedRows | Group-Object { $_.Row.Category })
+$totalGroups = $groups.Count
+if ($totalGroups -eq 0) {
     Write-Output "NO CANDIDATES: candidates.csv is empty (nothing to clean)."
 }
+$catDone = 0
 
 foreach ($g in $groups) {
     $cat  = [string]$g.Name
-    $risk = [string]$g.Group[0].Risk
+    $risk = [string]$g.Group[0].Row.Risk
+    $catDone++
+    Write-Progress -Activity "Cleaning $cat" -Status "$catDone/$totalGroups categories" -PercentComplete ([Math]::Floor(100 * $catDone / [Math]::Max(1, $totalGroups)))
 
     # -Categories whitelist.
     if ($catFilter -and ($catFilter -notcontains $cat)) {
         Write-Output "SKIP: category $cat excluded by -Categories filter"
         continue
     }
+
+    # todo 4 resume: a category whose EVERY row lies before lastCleanedRowIndex
+    # was fully handled in a previous run; skip it without re-prompting.
+    if ($null -ne $resumeState -and @($g.Group | Where-Object { $_.Index -ge $skipUntil }).Count -eq 0) {
+        Write-Output "SKIP: category $cat already completed (resume, rows < lastCleanedRowIndex)"
+        continue
+    }
+
+    $groupEndIndex = @($g.Group | ForEach-Object { $_.Index } | Measure-Object -Maximum).Maximum
 
     switch ($risk) {
 
@@ -408,8 +474,9 @@ foreach ($g in $groups) {
                 continue
             }
             Write-Output "CLEAN: category $cat (ASK, approved by -Yes)"
-            foreach ($row in $g.Group) {
-                Invoke-CandidateRow -Row $row -Category $cat -CsvPath $cleanupCsv -QuarantineDir $QuarantineDir
+            foreach ($item in $g.Group) {
+                if ([int]$item.Index -lt $skipUntil) { continue }   # todo 4 resume
+                Invoke-CandidateRow -Row $item.Row -Category $cat -CsvPath $cleanupCsv -QuarantineDir $QuarantineDir
             }
         }
 
@@ -435,7 +502,9 @@ foreach ($g in $groups) {
                     Disposition  = 'SKIP_ELEVATION_DENIED'
                 }
                 Write-Output "SKIP_ELEVATION_DENIED: $cat (UAC not launched, -SkipElevated)"
-                continue
+                # break (not continue): the category WAS handled - fall through to
+                # the post-category clean-checkpoint write below.
+                break
             }
 
             # -Yes but NOT the system drive: refuse to launch the batch.
@@ -448,7 +517,7 @@ foreach ($g in $groups) {
                     Disposition  = 'SKIP_ELEVATION_DENIED'
                 }
                 Write-Output "SKIP_ELEVATION_DENIED: $cat ($Drive is not the system drive)"
-                continue
+                break
             }
 
             # -Yes + user-profile drive + system drive: launch via UAC.
@@ -477,7 +546,7 @@ foreach ($g in $groups) {
         # ---- SAFE / CAUTION (and any unknown risk): per-row dispatch -----
         default {
             if (-not $Yes.IsPresent) {
-                $total = ($g.Group | Measure-Object -Property SizeBytes -Sum -ErrorAction SilentlyContinue).Sum
+                $total = ($g.Group | Measure-Object -Property { $_.Row.SizeBytes } -Sum -ErrorAction SilentlyContinue).Sum
                 Write-Output "SUMMARY: category $cat - $($g.Group.Count) item(s), $total byte(s)"
                 $answer = Read-Host "Clean category $cat? (y/n)"
                 if ($answer -notmatch '^[yY]') {
@@ -486,11 +555,16 @@ foreach ($g in $groups) {
                 }
             }
             Write-Output "CLEAN: category $cat ($risk)"
-            foreach ($row in $g.Group) {
-                Invoke-CandidateRow -Row $row -Category $cat -CsvPath $cleanupCsv -QuarantineDir $QuarantineDir
+            foreach ($item in $g.Group) {
+                if ([int]$item.Index -lt $skipUntil) { continue }   # todo 4 resume
+                Invoke-CandidateRow -Row $item.Row -Category $cat -CsvPath $cleanupCsv -QuarantineDir $QuarantineDir
             }
         }
     }
+
+    # todo 4: checkpoint after each completed category (failures ignored).
+    if (-not $completedCats.Contains($cat)) { [void]$completedCats.Add($cat) }
+    Write-CleanCheckpoint -Path $cleanCheckpointPath -Completed $completedCats -LastIndex ($groupEndIndex + 1)
 }
 
 Write-Output "CLEAN COMPLETE: cleanup CSV at $cleanupCsv"
