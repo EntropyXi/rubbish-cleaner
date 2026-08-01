@@ -28,9 +28,13 @@ jobs:
         shell: pwsh
         run: |
           $forbidden = @('\?\?', '\|\|', '&&', '-AsHashtable', 'ForEach-Object\s+-Parallel')
-          # scripts/lib/rubbish-core.ps1 is EXCLUDED: todo 3's Invoke-ParallelForEach
-          # legitimately uses ForEach-Object -Parallel inside the pwsh-7 guard ($script:IsCoreCLR)
-          $hits = Select-String -Path scripts\*.ps1 -Pattern ($forbidden -join '|') -AllMatches
+          # Two files are EXCLUDED from this scan:
+          # - scripts/lib/rubbish-core.ps1: Invoke-ParallelForEach legitimately uses
+          #   ForEach-Object -Parallel inside the pwsh-7 guard ($script:IsCoreCLR)
+          # - scripts/schedule.ps1: its CronLine string literal contains '&&' as DATA
+          #   (cron command chaining), not pwsh-7 operator syntax -> false positive
+          # The list below is the 4 PS 5.1-pure scripts that must stay clean.
+          $hits = Select-String -Path scripts\scan-drive.ps1,scripts\clean-drive.ps1,scripts\verify-report.ps1,scripts\install.ps1 -Pattern ($forbidden -join '|') -AllMatches
           if ($hits) { Write-Host "FORBIDDEN SYNTAX FOUND:"; $hits | ForEach-Object { Write-Host "$_" }; throw "PS 5.1 incompatible syntax detected" }
           else { Write-Host "PS 5.1 COMPATIBILITY: PASS" }
       - name: Run Pester 5 unit tests
