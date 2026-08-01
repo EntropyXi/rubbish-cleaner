@@ -22,10 +22,13 @@ function Test-DirEmpty {
     param([string]$Path)
 
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+    # Re-check the target itself so a directory replaced by a traversal link
+    # between scan and cleanup is never enumerated during the delete gate.
+    if (Test-IsJunction -Path $Path) { return $false }
 
     foreach ($child in Get-ChildItem -LiteralPath $Path -Force) {
-        # Never descend into reparse points (junctions / symlinks).
-        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+        # Never descend into Windows reparse points or POSIX symbolic links.
+        if (Test-IsJunction -Path $child.FullName) { continue }
 
         if ($child.PSIsContainer) {
             # Recurse into non-junction subdirs by hand.
@@ -38,13 +41,23 @@ function Test-DirEmpty {
     return $true
 }
 
-# (b) Returns $true when $Path is a reparse point (junction).
+# (b) Returns $true when $Path is a Windows reparse point or a POSIX symbolic
+# link. Hard links are ordinary files for traversal purposes and must not be
+# skipped by Test-DirEmpty.
+# The legacy function name is retained because it is used throughout the
+# scanner; LinkType is the cross-platform filesystem-provider signal.
 function Test-IsJunction {
     param([string]$Path)
 
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $item) { return $false }
-    return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $true
+    }
+
+    $linkTypeProperty = $item.PSObject.Properties['LinkType']
+    if ($null -eq $linkTypeProperty) { return $false }
+    return @('SymbolicLink', 'Junction') -contains [string]$linkTypeProperty.Value
 }
 
 # (c) Per-item safe removal. Removes one item with try/catch and records the

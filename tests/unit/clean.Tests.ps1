@@ -61,7 +61,7 @@ Describe 'Invoke-SafeRemove' {
         $rows[0].Action | Should -Be 'Remove'
     }
 
-    It 'leaves a locked file in place and records SKIP_LOCKED' {
+    It 'uses the host filesystem semantics when removing an exclusively opened file' {
         $f = Join-Path $script:SuiteRoot 'locked.txt'
         Set-Content -LiteralPath $f -Value 'locked payload'
         $handle = $null
@@ -73,18 +73,25 @@ Describe 'Invoke-SafeRemove' {
 
             Invoke-SafeRemove -LiteralPath $f -Phase 'test' -CsvPath $script:CleanupCsv
 
-            Test-Path -LiteralPath $f | Should -BeTrue
+            if ($script:IsWin) {
+                Test-Path -LiteralPath $f | Should -BeTrue
+            } else {
+                Test-Path -LiteralPath $f | Should -BeFalse
+            }
         } finally {
             if ($null -ne $handle) { $handle.Close() }
         }
 
-        # Once the handle is released the file is deletable again.
-        Test-FileLocked -LiteralPath $f | Should -BeFalse
-
         $rows = @(Get-CleanupRowsFrom -CsvPath $script:CleanupCsv | Where-Object { $_.Path -eq $f })
         $rows.Count | Should -Be 1
-        $rows[0].Disposition | Should -Be 'SKIP_LOCKED'
-        $rows[0].ErrorMessage | Should -Not -BeNullOrEmpty
+        if ($script:IsWin) {
+            Test-FileLocked -LiteralPath $f | Should -BeFalse
+            $rows[0].Disposition | Should -Be 'SKIP_LOCKED'
+            $rows[0].ErrorMessage | Should -Not -BeNullOrEmpty
+        } else {
+            $rows[0].Disposition | Should -Be 'OK'
+            $rows[0].ErrorMessage | Should -BeNullOrEmpty
+        }
     }
 }
 

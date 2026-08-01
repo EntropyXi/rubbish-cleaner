@@ -41,7 +41,8 @@ BeforeAll {
     $script:JunctionLink = Join-Path (New-TestDir 'links') 'reparse-link'
     $script:ReparseCreated = $false
     try {
-        New-Item -ItemType Junction -Path $script:JunctionLink -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $script:JunctionLink -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
         $script:ReparseCreated = $true
     } catch {
         try {
@@ -75,9 +76,35 @@ Describe 'Test-DirEmpty' {
         }
         $d = New-TestDir 'only-reparse-child'
         $link = Join-Path $d 'link'
-        New-Item -ItemType Junction -Path $link -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $link -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
         Test-IsJunction -Path $link | Should -BeTrue
         Test-DirEmpty -Path $d | Should -BeTrue
+    }
+
+    It 'returns $false when the path itself is a junction or symbolic link' {
+        if (-not $script:ReparseCreated) {
+            Set-ItResult -Inconclusive -Because 'cannot create reparse points on this machine'
+            return
+        }
+        Test-IsJunction -Path $script:JunctionLink | Should -BeTrue
+        Test-DirEmpty -Path $script:JunctionLink | Should -BeFalse
+    }
+
+    It 'treats a hard-linked file as content rather than a traversal link' {
+        $targetDir = New-TestDir 'hardlink-target'
+        $target = Join-Path $targetDir 'source.txt'
+        Set-Content -LiteralPath $target -Value 'hardlink payload'
+        $container = New-TestDir 'hardlink-child'
+        $link = Join-Path $container 'linked.txt'
+        try {
+            New-Item -ItemType HardLink -Path $link -Target $target -ErrorAction Stop | Out-Null
+        } catch {
+            Set-ItResult -Skipped -Because 'hard links are unavailable on this filesystem'
+            return
+        }
+        Test-IsJunction -Path $link | Should -BeFalse
+        Test-DirEmpty -Path $container | Should -BeFalse
     }
 
     It 'returns $true for nested empty directories' {

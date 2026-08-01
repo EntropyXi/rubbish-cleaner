@@ -81,7 +81,15 @@ BeforeAll {
     Set-Content -LiteralPath (Join-Path $keep 'userfile.txt') -Value 'user data'
 
     # ---- run the shared classifier (all categories, non-user drive) ------
-    $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false
+    # This fixture exercises the Windows/common root-category templates on
+    # every host. POSIX-specific dispatch is covered by a separate test below.
+    $detectedIsWin = $script:IsWin
+    try {
+        $script:IsWin = $true
+        $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false
+    } finally {
+        $script:IsWin = $detectedIsWin
+    }
     # NOTE: Get-JunkCandidates returns generic List[object] collections, which
     # PS 5.1 cannot unroll with the @() operator (throws "argument type
     # mismatch"); .ToArray() -> object[] is portable across PS 5.1 and 7.
@@ -149,6 +157,69 @@ Describe 'scan classification' {
         $names.Count | Should -Be 7
         foreach ($n in @('root-temps', 'root-logs', 'duplicate-archives', 'empty-dirs', 'recycle-bin', 'root-suspicious', 'app-caches')) {
             $names -contains $n | Should -BeTrue
+        }
+    }
+
+    It 'evaluates root-temps exactly once through the POSIX implementation' {
+        $tempRoot = Join-Path $script:SuiteRoot 'isolated-posix-temp'
+        $nestedTemp = Join-Path $tempRoot 'nested'
+        New-Item -ItemType Directory -Path $nestedTemp -Force | Out-Null
+        $topLevelOld = Join-Path $tempRoot 'top-level-old.tmp'
+        $nestedOld = Join-Path $nestedTemp 'nested-old.tmp'
+        Set-Content -LiteralPath $topLevelOld -Value 'old top-level temp'
+        Set-Content -LiteralPath $nestedOld -Value 'old nested temp'
+        [System.IO.File]::SetLastWriteTime($topLevelOld, (Get-Date).AddDays(-10))
+        [System.IO.File]::SetLastWriteTime($nestedOld, (Get-Date).AddDays(-10))
+
+        $detectedIsWin = $script:IsWin
+        $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+        $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
+        try {
+            $script:IsWin = $false
+            [System.Environment]::SetEnvironmentVariable('TEMP', $tempRoot, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $tempRoot, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $tempRoot, 'Process')
+            $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps')
+        } finally {
+            $script:IsWin = $detectedIsWin
+            [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
+        }
+        $names = @($result.Evaluated.ToArray() | ForEach-Object { $_.name })
+        @($names | Where-Object { $_ -eq 'root-temps' }).Count | Should -Be 1
+        $rows = @($result.Rows.ToArray() | Where-Object { $_.Category -eq 'root-temps' })
+        $rows.Count | Should -Be 1
+        $rows[0].Path | Should -Be $topLevelOld
+    }
+
+    It 'recursive helpers never follow a linked root or linked child' {
+        $target = Join-Path $script:SuiteRoot 'linked-walk-target'
+        New-Item -ItemType Directory -Path (Join-Path $target 'cache') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $target 'sentinel.bin') -Value 'outside walk root'
+        $walkRoot = Join-Path $script:SuiteRoot 'linked-walk-root'
+        New-Item -ItemType Directory -Path $walkRoot -Force | Out-Null
+        $rootLink = Join-Path $script:SuiteRoot 'linked-walk-as-root'
+        $childLink = Join-Path $walkRoot 'linked-child'
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        try {
+            New-Item -ItemType $linkType -Path $rootLink -Target $target -ErrorAction Stop | Out-Null
+            New-Item -ItemType $linkType -Path $childLink -Target $target -ErrorAction Stop | Out-Null
+        } catch {
+            if (Test-Path -LiteralPath $childLink) { [System.IO.Directory]::Delete($childLink) }
+            if (Test-Path -LiteralPath $rootLink) { [System.IO.Directory]::Delete($rootLink) }
+            Set-ItResult -Inconclusive -Because "cannot create traversal link: $($_.Exception.Message)"
+            return
+        }
+        try {
+            (Get-DirStatsNoJunction -LiteralPath $rootLink).FileCount | Should -Be 0
+            @(Find-DirsNamed -LiteralRoot $rootLink -Name 'cache').Count | Should -Be 0
+            (Get-DirStatsNoJunction -LiteralPath $walkRoot).FileCount | Should -Be 0
+            @(Find-DirsNamed -LiteralRoot $walkRoot -Name 'cache').Count | Should -Be 0
+        } finally {
+            if (Test-Path -LiteralPath $childLink) { [System.IO.Directory]::Delete($childLink) }
+            if (Test-Path -LiteralPath $rootLink) { [System.IO.Directory]::Delete($rootLink) }
         }
     }
 

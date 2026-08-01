@@ -204,9 +204,53 @@ Describe 'PlatformDetection' {
         [string]::IsNullOrWhiteSpace((Get-UserCacheDir)) | Should -BeFalse
     }
 
-    It 'resolves non-empty system temp and documents directories' {
-        [string]::IsNullOrWhiteSpace((Get-SystemTempDir)) | Should -BeFalse
+    It 'resolves the normalized runtime temp root and a non-empty documents directory' {
+        $systemTemp = Get-SystemTempDir
+        $systemTemp | Should -Be ([System.IO.Path]::GetTempPath().TrimEnd('\', '/'))
+        Test-Path -LiteralPath $systemTemp -PathType Container | Should -BeTrue
         [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)) | Should -BeFalse
+    }
+
+    It 'preserves a filesystem root selected as the runtime temp directory' {
+        $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+        $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
+        $rootTemp = if ($script:IsWin) { $script:TestDrive + '\' } else { '/' }
+        try {
+            if ($script:IsWin) {
+                [System.Environment]::SetEnvironmentVariable('TEMP', $rootTemp, 'Process')
+                [System.Environment]::SetEnvironmentVariable('TMP', $rootTemp, 'Process')
+            } else {
+                [System.Environment]::SetEnvironmentVariable('TMPDIR', $rootTemp, 'Process')
+            }
+            [System.IO.Path]::GetTempPath() | Should -Be $rootTemp
+            Get-SystemTempDir | Should -Be $rootTemp
+        } finally {
+            [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
+        }
+    }
+
+    It 'normalizes repeated separators without collapsing a runtime temp root' {
+        $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+        $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
+        $repeatedRoot = if ($script:IsWin) { $script:TestDrive + '\\' } else { '///' }
+        $expectedRoot = if ($script:IsWin) { $script:TestDrive + '\' } else { '/' }
+        try {
+            if ($script:IsWin) {
+                [System.Environment]::SetEnvironmentVariable('TEMP', $repeatedRoot, 'Process')
+                [System.Environment]::SetEnvironmentVariable('TMP', $repeatedRoot, 'Process')
+            } else {
+                [System.Environment]::SetEnvironmentVariable('TMPDIR', $repeatedRoot, 'Process')
+            }
+            Get-SystemTempDir | Should -Be $expectedRoot
+        } finally {
+            [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
+        }
     }
 }
 

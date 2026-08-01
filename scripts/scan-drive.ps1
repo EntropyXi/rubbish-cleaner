@@ -174,8 +174,9 @@ function Get-DirStatsNoJunction {
 
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
+        if (Test-IsJunction -Path $dir) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if (Test-IsJunction -Path $item.FullName) { continue }
             if ($item.PSIsContainer) {
                 $stack.Push($item.FullName)
             } else {
@@ -205,8 +206,9 @@ function Find-DirsNamed {
 
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
+        if (Test-IsJunction -Path $dir) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $dir -Force -Directory -ErrorAction SilentlyContinue) {
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if (Test-IsJunction -Path $item.FullName) { continue }
             if ($item.Name -eq $Name) {
                 $found.Add($item.FullName)
             } else {
@@ -337,7 +339,7 @@ function Get-JunkCandidates {
     # root-temps (SAFE): top-level FILES older than 7 days in
     # <Drive>\Temp, <Drive>\tmp, <Drive>\temp -- never subdirs.
     # ----------------------------------------------------------------
-    if (-not $catFilter -or $catFilter -contains 'root-temps') {
+    if ($script:IsWin -and (-not $catFilter -or $catFilter -contains 'root-temps')) {
         Update-CategoryProgress -Pg $pg -Category 'root-temps'
         if (-not $resumeSkipped.ContainsKey('root-temps')) {
             $result.Evaluated.Add(@{ name = 'root-temps'; risk = 'SAFE' })
