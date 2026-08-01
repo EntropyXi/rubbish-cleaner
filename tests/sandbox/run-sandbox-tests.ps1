@@ -17,6 +17,17 @@
 #                             + a full clean-drive.ps1 subprocess gate test
 #   4. ReportFixture        - crafted RunDir -> verify-report.ps1 subprocess ->
 #                             summary.md section assertions
+#   5. InvokeParallelForEach- Invoke-ParallelForEach: TL2 processes all 10,
+#                             TL1 result set matches, 0 leftover jobs
+#   6. CheckpointResume      - scan checkpoint produced; partial resume skips a
+#                             completed category + resumes current lastPath;
+#                             -Resume subprocess skip message
+#   7. PlatformDetection     - platform.ps1: IsWindows / Get-FixedDriveLetters /
+#                             Get-UserCacheDir
+#   8. ScheduleParams        - schedule.ps1 List/Register exit codes + policy
+#                             JSONs parse
+#   9. MultiDrive            - scan-drive.ps1 -Drives -> two per-drive run dirs;
+#                             -Parallel same result
 #
 # Safety: ALL temp state lives under $env:TEMP\rubbish-cleaner-tests\<pid>\.
 # Cleanup runs in finally: reparse links first (so -Recurse never follows a
@@ -457,6 +468,246 @@ $suite4 = {
 }
 
 # =====================================================================
+# SUITE 5: InvokeParallelForEach
+# =====================================================================
+# Exercises the real Invoke-ParallelForEach from rubbish-core.ps1: 10 temp
+# dirs renamed via ThrottleLimit 2 (all processed), a result-set comparison
+# against ThrottleLimit 1, and a 0-leftover-jobs check.
+$suite5 = {
+    $base = Join-Path $script:TestRoot 's5-parallel'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+
+    # ---- 10 temp dirs --------------------------------------------------
+    $dirs = @()
+    for ($i = 0; $i -lt 10; $i++) {
+        $d = Join-Path $base ("p{0}" -f $i)
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        $dirs += $d
+    }
+
+    # ---- ThrottleLimit 2: every input item is processed -----------------
+    $results2 = @(Invoke-ParallelForEach -InputObject $dirs -ScriptBlock {
+        param($x) [System.IO.Path]::GetFileName($x)
+    } -ThrottleLimit 2)
+    Assert-Equal 'InvokeParallelForEach: TL2 returns all 10 results' 10 $results2.Count
+
+    # ---- ThrottleLimit 1: same result set as the parallel run -----------
+    $results1 = @(Invoke-ParallelForEach -InputObject $dirs -ScriptBlock {
+        param($x) [System.IO.Path]::GetFileName($x)
+    } -ThrottleLimit 1)
+    Assert-Equal 'InvokeParallelForEach: TL1 returns all 10 results' 10 $results1.Count
+    Assert-Equal 'InvokeParallelForEach: TL1/TL2 result sets match' (($results1 | Sort-Object) -join ',') (($results2 | Sort-Object) -join ',')
+
+    # ---- parallel rename (TL2): all 10 dirs renamed ----------------------
+    Invoke-ParallelForEach -InputObject $dirs -ScriptBlock {
+        param($p) Rename-Item -LiteralPath $p -NewName ((Split-Path $p -Leaf) + '-done')
+    } -ThrottleLimit 2 | Out-Null
+    $renamedOk = 0
+    for ($i = 0; $i -lt 10; $i++) {
+        if (Test-Path -LiteralPath (Join-Path $base ("p{0}-done" -f $i)) -PathType Container) { $renamedOk++ }
+    }
+    Assert-Equal 'InvokeParallelForEach: TL2 rename processed all 10 dirs' 10 $renamedOk
+    Assert-Equal 'InvokeParallelForEach: no original dirs left behind' 0 @(Get-ChildItem -LiteralPath $base -Directory -Filter 'p[0-9]' -ErrorAction SilentlyContinue).Count
+
+    # ---- no leftover background jobs -------------------------------------
+    Assert-Equal 'InvokeParallelForEach: 0 leftover jobs' 0 @(Get-Job).Count
+}
+
+# =====================================================================
+# SUITE 6: CheckpointResume
+# =====================================================================
+# (A) a 2-category scan against a fake tree produces a scan-checkpoint.json
+#     with both categories marked complete; (B) a partial resume state skips
+#     the completed category and resumes the current category at lastPath
+#     (files sorting strictly before lastPath are dropped); (C) a real
+#     scan-drive.ps1 -Resume subprocess prints the skip/resume message.
+$suite6 = {
+    $base = Join-Path $script:TestRoot 's6-checkpoint'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $root = Join-Path $base 'fake'
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+    # ---- fake tree: root-temps (Temp\a.tmp) + root-logs (boot.log) ------
+    $tempDir = Join-Path $root 'Temp'
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    $aTmp = Join-Path $tempDir 'a.tmp'
+    Set-Content -LiteralPath $aTmp -Value 'old temp'
+    [System.IO.File]::SetLastWriteTime($aTmp, (Get-Date).AddDays(-10))
+    $bootLog = Join-Path $root 'boot.log'
+    Set-Content -LiteralPath $bootLog -Value 'boot log'
+    [System.IO.File]::SetLastWriteTime($bootLog, (Get-Date).AddDays(-10))
+
+    # ---- (A) checkpoint PRODUCED after a 2-category scan -----------------
+    $cpPath = Join-Path $base 'scan-checkpoint.json'
+    $state  = New-ScanCheckpointState -Path $cpPath -Drive 'C:'
+    $r = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps','root-logs') -Checkpoint $state
+    Assert-Equal 'CheckpointResume: checkpoint file written' $true (Test-Path -LiteralPath $cpPath -PathType Leaf)
+    $cp = Get-Content -LiteralPath $cpPath -Raw | ConvertFrom-Json
+    Assert-Equal 'CheckpointResume: checkpoint drive = C:' 'C:' ([string]$cp.drive)
+    Assert-True 'CheckpointResume: root-temps marked complete' (@($cp.completedCategories) -contains 'root-temps')
+    Assert-True 'CheckpointResume: root-logs marked complete' (@($cp.completedCategories) -contains 'root-logs')
+
+    # ---- (B) partial resume: completed root-temps skipped, root-logs -----
+    # resumes at lastPath = b.log (a.log sorts strictly before -> dropped).
+    $resumeTree = Join-Path $base 'resume-tree'
+    New-Item -ItemType Directory -Force -Path $resumeTree | Out-Null
+    $aLog = Join-Path $resumeTree 'a.log'
+    Set-Content -LiteralPath $aLog -Value 'x'
+    [System.IO.File]::SetLastWriteTime($aLog, (Get-Date).AddDays(-10))
+    $bLog = Join-Path $resumeTree 'b.log'
+    Set-Content -LiteralPath $bLog -Value 'y'
+    [System.IO.File]::SetLastWriteTime($bLog, (Get-Date).AddDays(-10))
+    $resumeTemp = Join-Path $resumeTree 'Temp'
+    New-Item -ItemType Directory -Force -Path $resumeTemp | Out-Null
+    $skipTmp = Join-Path $resumeTemp 'skip.tmp'
+    Set-Content -LiteralPath $skipTmp -Value 'z'
+    [System.IO.File]::SetLastWriteTime($skipTmp, (Get-Date).AddDays(-10))
+
+    $resumeState = @{
+        CompletedCategories = @('root-temps')
+        CurrentCategory     = 'root-logs'
+        LastPath            = $bLog
+    }
+    $r2 = Get-JunkCandidates -RootPath $resumeTree -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps','root-logs') -ResumeState $resumeState
+    $rows2 = @($r2.Rows.ToArray())
+    $eval2 = @($r2.Evaluated.ToArray())
+    Assert-Equal 'CheckpointResume: completed category not re-evaluated' 1 $eval2.Count
+    Assert-Equal 'CheckpointResume: only root-logs evaluated' 'root-logs' ([string]$eval2[0].name)
+    Assert-Equal 'CheckpointResume: skipped category yields no rows' 0 @($rows2 | Where-Object { $_.Category -eq 'root-temps' }).Count
+    Assert-Equal 'CheckpointResume: file before lastPath skipped' 0 @($rows2 | Where-Object { $_.Path -eq $aLog }).Count
+    Assert-Equal 'CheckpointResume: file at lastPath re-scanned' 1 @($rows2 | Where-Object { $_.Path -eq $bLog }).Count
+
+    # ---- (C) -Resume subprocess: skip/resume message ---------------------
+    $outDir = Join-Path $base 'out'
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $runDir = Join-Path $outDir ("C-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+    $cpJson = [ordered]@{
+        drive               = 'C:'
+        completedCategories = @('root-temps')
+        currentCategory     = 'root-logs'
+        lastPath            = ''
+        totalBytesSoFar     = 0
+        timestamp           = (Get-Date).ToString('o')
+    }
+    [System.IO.File]::WriteAllText((Join-Path $runDir 'scan-checkpoint.json'),
+        (ConvertTo-Json -InputObject $cpJson), (New-Object System.Text.UTF8Encoding($false)))
+    $subOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drive C: -OutDir $outDir -Resume -Categories root-temps,root-logs
+    Assert-Equal 'CheckpointResume: resume subprocess exit 0' 0 $LASTEXITCODE
+    Assert-True 'CheckpointResume: resume skip message printed' (($subOut | Out-String) -match 'RESUME: resuming from')
+}
+
+# =====================================================================
+# SUITE 7: PlatformDetection
+# =====================================================================
+$suite7 = {
+    . (Join-Path $script:RepoRoot 'scripts\lib\platform.ps1')
+    Assert-Equal 'PlatformDetection: IsWindows true on this machine' $true ([bool]$script:IsWindows)
+    Assert-True 'PlatformDetection: at least 1 fixed drive letter' (@(Get-FixedDriveLetters).Count -ge 1)
+    Assert-True 'PlatformDetection: user cache dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserCacheDir)))
+    Assert-Equal 'PlatformDetection: system temp dir matches $env:TEMP on Windows' $env:TEMP (Get-SystemTempDir)
+    Assert-True 'PlatformDetection: user documents dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)))
+}
+
+# =====================================================================
+# SUITE 8: ScheduleParams
+# =====================================================================
+$suite8 = {
+    $base = Join-Path $script:TestRoot 's8-schedule'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $sched = Join-Path $script:RepoRoot 'scripts\schedule.ps1'
+    $policyDir = Join-Path $script:RepoRoot 'references\policies'
+
+    # ---- -Action List exits 0 -------------------------------------------
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sched -Action List | Out-Null
+    Assert-Equal 'ScheduleParams: -Action List exit 0' 0 $LASTEXITCODE
+
+    # ---- Register on a NON-elevated shell -> admin error (exit 1) --------
+    # Elevated shells SKIP this assertion (registration would succeed there).
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        Write-Output 'SUITE ScheduleParams: SKIP register-admin assertion (running elevated)'
+    } else {
+        # Start-Process redirects stderr to a file without generating error
+        # records: under $ErrorActionPreference 'Stop' a native stderr
+        # redirect (2> or 2>&1) would abort the harness on the Write-Error.
+        $errFile = Join-Path $base 'register-err.txt'
+        $outFile = Join-Path $base 'register-out.txt'
+        $proc = Start-Process -FilePath 'powershell.exe' `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $sched, '-Action', 'Register', '-Drive', 'C:', '-Policy', 'safe') `
+            -Wait -PassThru -NoNewWindow -RedirectStandardError $errFile -RedirectStandardOutput $outFile
+        Assert-Equal 'ScheduleParams: non-elevated Register exits 1' 1 $proc.ExitCode
+        $errText = if (Test-Path -LiteralPath $errFile) { [System.IO.File]::ReadAllText($errFile) } else { '' }
+        Assert-True 'ScheduleParams: admin-required error message' ($errText -match 'administrator')
+    }
+
+    # ---- policy JSONs parse with a Categories array ----------------------
+    $safe = Get-Content -LiteralPath (Join-Path $policyDir 'safe.json') -Raw | ConvertFrom-Json
+    $aggr = Get-Content -LiteralPath (Join-Path $policyDir 'aggressive.json') -Raw | ConvertFrom-Json
+    Assert-Equal 'ScheduleParams: safe.json name' 'safe' ([string]$safe.name)
+    Assert-True 'ScheduleParams: safe.json has Categories array' (@($safe.Categories).Count -ge 1)
+    Assert-Equal 'ScheduleParams: aggressive.json name' 'aggressive' ([string]$aggr.name)
+    Assert-True 'ScheduleParams: aggressive.json has Categories array' (@($aggr.Categories).Count -ge 1)
+    Assert-Equal 'ScheduleParams: aggressive.json includeElevated=true' $true ([bool]$aggr.includeElevated)
+}
+
+# =====================================================================
+# SUITE 9: MultiDrive
+# =====================================================================
+# Two fixed drives (real volumes; scan-drive.ps1 refuses non-fixed drives) are
+# scanned read-only with a tiny category filter (-Categories root-temps,
+# root-logs). Both the sequential and -Parallel batch modes must produce a
+# combined multidrive-*/drives.csv with two OK rows and two DISTINCT per-drive
+# run dirs under the OutDir. Machines with fewer than 2 fixed drives SKIP.
+$suite9 = {
+    $base = Join-Path $script:TestRoot 's9-multidrive'
+    New-Item -ItemType Directory -Force -Path $base | Out-Null
+    $outSeq = Join-Path $base 'out-sequential'
+    $outPar = Join-Path $base 'out-parallel'
+    New-Item -ItemType Directory -Force -Path $outSeq | Out-Null
+    New-Item -ItemType Directory -Force -Path $outPar | Out-Null
+
+    $driveLetters = @(Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } | Select-Object -First 2 -ExpandProperty DriveLetter)
+    if ($driveLetters.Count -lt 2) {
+        Write-Output 'SUITE MultiDrive: SKIP (fewer than 2 fixed drives)'
+        return
+    }
+    $drivesArg = (($driveLetters | ForEach-Object { $_.ToString() + ':' }) -join ',')
+
+    function Assert-MultiDriveResult {
+        param([string]$OutDir, [string]$Label)
+        $multi = @(Get-ChildItem -LiteralPath $OutDir -Directory -Filter 'multidrive-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        Assert-Equal ("MultiDrive[{0}]: multidrive summary dir created" -f $Label) 1 $multi.Count
+        $csv = Join-Path $multi[0].FullName 'drives.csv'
+        Assert-Equal ("MultiDrive[{0}]: drives.csv written" -f $Label) $true (Test-Path -LiteralPath $csv -PathType Leaf)
+        $lines = @([System.IO.File]::ReadAllLines($csv))
+        Assert-Equal ("MultiDrive[{0}]: header + 2 drive rows" -f $Label) 3 $lines.Count
+        $runDirs = New-Object System.Collections.Generic.List[string]
+        for ($i = 1; $i -lt $lines.Count; $i++) {
+            $cols = @($lines[$i] -split '\|')
+            Assert-Equal ("MultiDrive[{0}]: row {1} Status OK" -f $Label, $i) 'OK' $cols[3]
+            Assert-True ("MultiDrive[{0}]: row {1} RunDir non-empty" -f $Label, $i) (-not [string]::IsNullOrWhiteSpace($cols[1]))
+            [void]$runDirs.Add($cols[1])
+        }
+        Assert-Equal ("MultiDrive[{0}]: 2 distinct per-drive run dirs" -f $Label) 2 @($runDirs | Select-Object -Unique).Count
+        foreach ($letter in $driveLetters) {
+            Assert-True ("MultiDrive[{0}]: run dir for drive {1} exists" -f $Label, $letter) (@(Get-ChildItem -LiteralPath $OutDir -Directory -Filter "$letter-*").Count -ge 1)
+        }
+    }
+
+    # ---- sequential per-drive subprocesses -------------------------------
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outSeq -Categories root-temps,root-logs | Out-Null
+    Assert-Equal 'MultiDrive: sequential -Drives exit 0' 0 $LASTEXITCODE
+    Assert-MultiDriveResult -OutDir $outSeq -Label 'sequential'
+
+    # ---- parallel per-drive subprocesses (same result) -------------------
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outPar -Categories root-temps,root-logs -Parallel | Out-Null
+    Assert-Equal 'MultiDrive: parallel -Drives exit 0' 0 $LASTEXITCODE
+    Assert-MultiDriveResult -OutDir $outPar -Label 'parallel'
+}
+
+# =====================================================================
 # Orchestration
 # =====================================================================
 Write-Output ("BRANCH: SANDBOX (test drive: {0})" -f $script:TestDrive)
@@ -483,6 +734,11 @@ try {
     Invoke-Suite -Name 'ScanClassification'   -Body $suite2
     Invoke-Suite -Name 'SafeDeleteQuarantine' -Body $suite3
     Invoke-Suite -Name 'ReportFixture'        -Body $suite4
+    Invoke-Suite -Name 'InvokeParallelForEach'-Body $suite5
+    Invoke-Suite -Name 'CheckpointResume'     -Body $suite6
+    Invoke-Suite -Name 'PlatformDetection'    -Body $suite7
+    Invoke-Suite -Name 'ScheduleParams'       -Body $suite8
+    Invoke-Suite -Name 'MultiDrive'           -Body $suite9
 
     # ---- result + exit ---------------------------------------------------
     if ($script:Failures.Count -eq 0) {
