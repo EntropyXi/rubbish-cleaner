@@ -151,9 +151,9 @@ function Get-ScheduledCommand {
     $repo    = Get-RepoRoot
     $scan    = Join-Path $repo 'scripts\scan-drive.ps1'
     $clean   = Join-Path $repo 'scripts\clean-drive.ps1'
-    $shell   = if ($script:IsWindows) { 'powershell.exe' } else { 'pwsh' }
+    $shell   = if ($script:IsWin) { 'powershell.exe' } else { 'pwsh' }
 
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         return @{
             Shell       = $shell
             Argument    = "-NoProfile -ExecutionPolicy Bypass -Command `"& '$scan' -Drive $CommandDrive -Categories $CategoryList; & '$clean' -Drive $CommandDrive -Yes`""
@@ -183,7 +183,7 @@ if ($Action -eq 'Register') {
     }
 
     # (a) Windows: enforce administrator privileges BEFORE touching the scheduler.
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $isAdmin) {
@@ -199,7 +199,7 @@ if ($Action -eq 'Register') {
     $timeParts = Get-TimeParts -TimeString $Time
     $scheduleLabel = "daily at $Time"
 
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         $taskName = "rubbish-cleaner-$Drive"
         $cmd = Get-ScheduledCommand -CommandDrive $Drive -CategoryList $categoryList
         $trigger = New-ScheduledTaskTrigger -Daily -At $Time
@@ -209,7 +209,7 @@ if ($Action -eq 'Register') {
         $summaryPath = Write-RegistrationSummary -SummaryDrive $Drive -PolicyName $Policy -ScheduleLabel $scheduleLabel -CommandText $cmd.Display
         Write-WindowsEventLog -EventDrive $Drive -EventSummary $summaryPath
     }
-    elseif ($script:IsLinux) {
+    elseif ($script:IsLx) {
         $cmd = Get-ScheduledCommand -CommandDrive $Drive -CategoryList $categoryList
         $cronLine = $cmd.CronLine.Replace('<MIN>', "$($timeParts.Minute)").Replace('<HOUR>', "$($timeParts.Hour)")
         $cronTarget = '/etc/cron.d/rubbish-cleaner'
@@ -230,7 +230,7 @@ if ($Action -eq 'Register') {
         }
         $summaryPath = Write-RegistrationSummary -SummaryDrive $Drive -PolicyName $Policy -ScheduleLabel $scheduleLabel -CommandText $cronLine
     }
-    elseif ($script:IsMacOS) {
+    elseif ($script:IsMac) {
         $cmd = Get-ScheduledCommand -CommandDrive $Drive -CategoryList $categoryList
         $plistDir  = Join-Path $HOME 'Library\LaunchAgents'
         $plistPath = Join-Path $plistDir 'com.rubbish-cleaner.plist'
@@ -281,7 +281,7 @@ if ($Action -eq 'Register') {
 # Action: Unregister
 # =====================================================================
 if ($Action -eq 'Unregister') {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         if ($Drive) {
             $tasks = @(Get-ScheduledTask -TaskName "rubbish-cleaner-$Drive" -ErrorAction SilentlyContinue)
         } else {
@@ -296,7 +296,7 @@ if ($Action -eq 'Unregister') {
             }
         }
     }
-    elseif ($script:IsLinux) {
+    elseif ($script:IsLx) {
         $current = @(& crontab -l 2>$null)
         if ($Drive) {
             $filtered = @($current | Where-Object { $_ -notmatch "rubbish-cleaner.*-Drive '$Drive'" })
@@ -313,7 +313,7 @@ if ($Action -eq 'Unregister') {
             Write-Host 'Removed rubbish-cleaner cron entrie(s).'
         }
     }
-    elseif ($script:IsMacOS) {
+    elseif ($script:IsMac) {
         $plistPath = Join-Path (Join-Path $HOME 'Library\LaunchAgents') 'com.rubbish-cleaner.plist'
         if (Test-Path -LiteralPath $plistPath) {
             & launchctl unload $plistPath 2>$null | Out-Null
@@ -335,7 +335,7 @@ if ($Action -eq 'Unregister') {
 # Action: List
 # =====================================================================
 if ($Action -eq 'List') {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         $tasks = @(Get-ScheduledTask -TaskName 'rubbish-cleaner-*' -ErrorAction SilentlyContinue)
         if ($tasks.Count -eq 0) {
             Write-Host 'No rubbish-cleaner scheduled tasks registered.'
@@ -346,7 +346,7 @@ if ($Action -eq 'List') {
             }
         }
     }
-    elseif ($script:IsLinux) {
+    elseif ($script:IsLx) {
         $current = @(& crontab -l 2>$null)
         $hits = @($current | Where-Object { $_ -match 'rubbish-cleaner' })
         if ($hits.Count -eq 0) {
@@ -356,7 +356,7 @@ if ($Action -eq 'List') {
             $hits | ForEach-Object { Write-Host "  $_" }
         }
     }
-    elseif ($script:IsMacOS) {
+    elseif ($script:IsMac) {
         $plistPath = Join-Path (Join-Path $HOME 'Library\LaunchAgents') 'com.rubbish-cleaner.plist'
         if (Test-Path -LiteralPath $plistPath) {
             Write-Host "Registered launchd agent: $plistPath"

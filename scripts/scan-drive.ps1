@@ -244,8 +244,8 @@ function Get-JunkCandidates {
     $catFilter = @($Categories | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 
     # ---- todo 4: progress total + resume bookkeeping ----
-    $orderCats = if ($script:IsWindows) { $script:WindowsCatOrder } else { $script:PosixCatOrder }
-    $userCats  = if ($script:IsWindows) {
+    $orderCats = if ($script:IsWin) { $script:WindowsCatOrder } else { $script:PosixCatOrder }
+    $userCats  = if ($script:IsWin) {
         @('browser-caches','gpu-shader','dev-caches','ide-caches','crash-dumps','thumbnail-cache','user-temp')
     } else {
         @('dev-caches','user-temp','browser-caches','ide-caches','crash-dumps','thumbnail-cache','recycle-bin')
@@ -785,7 +785,7 @@ function Get-JunkCandidates {
     # $IsUserDrive on non-Windows = ($Drive -eq '/'), so the user-profile
     # categories below run whenever the single '/' drive is scanned.
     # ----------------------------------------------------------------
-    if (-not $script:IsWindows) {
+    if (-not $script:IsWin) {
         $cache = Get-UserCacheDir
         $tmp = Get-SystemTempDir
 
@@ -974,7 +974,7 @@ function Get-JunkCandidates {
 # presence / mutual-exclusion errors fire before PowerShell's own binding
 # error. When -Drives is used, each drive is scanned by its OWN subprocess
 # (no in-process scope isolation) - Windows -> powershell.exe, Linux/macOS
-# -> pwsh, selected via platform.ps1's $script:IsWindows.
+# -> pwsh, selected via platform.ps1's $script:IsWin.
 # =====================================================================
 $driveGiven  = -not [string]::IsNullOrEmpty($Drive)
 $drivesGiven = ($null -ne $Drives) -and @($Drives).Count -gt 0
@@ -999,7 +999,7 @@ if ($drivesGiven) {
     New-Item -ItemType Directory -Force -Path $multiRoot | Out-Null
 
     # Subprocess executable + prefix args (todo 8 platform branch).
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         $scanExe = 'powershell.exe'
         $scanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
     } else {
@@ -1024,7 +1024,7 @@ if ($drivesGiven) {
     # (the NEWEST <Letter>-* dir under $OutDir for that drive).
     function Resolve-DriveRunDir {
         param([string]$DriveArg)
-        $prefix = if ($script:IsWindows) { $DriveArg.TrimEnd(':').ToUpperInvariant() } else { $DriveArg.TrimEnd(':') }
+        $prefix = if ($script:IsWin) { $DriveArg.TrimEnd(':').ToUpperInvariant() } else { $DriveArg.TrimEnd(':') }
         $dir = @(Get-ChildItem -LiteralPath $OutDir -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like "$prefix-*" } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -1076,8 +1076,8 @@ if ($drivesGiven) {
             $procDrives = New-Object System.Collections.Generic.List[string]
             foreach ($d in $driveList) {
                 $argsArr   = New-ScanSubprocessArgs -DriveArg $d
-                $outLog    = Join-Path $multiRoot ("{0}-scan.out.log" -f $(if ($script:IsWindows) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
-                $errLog    = Join-Path $multiRoot ("{0}-scan.err.log" -f $(if ($script:IsWindows) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
+                $outLog    = Join-Path $multiRoot ("{0}-scan.out.log" -f $(if ($script:IsWin) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
+                $errLog    = Join-Path $multiRoot ("{0}-scan.err.log" -f $(if ($script:IsWin) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
                 $argLine   = (($argsArr | ForEach-Object { if ($_ -match '[\s"]') { '"' + $_.Replace('"', '""') + '"' } else { $_ } }) -join ' ')
                 [void]$procDrives.Add($d)
                 [void]$procs.Add((Start-Process -FilePath $scanExe -ArgumentList $argLine -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog))
@@ -1163,7 +1163,7 @@ if ($null -eq $vol -or $vol.DriveType -ne 'Fixed') {
 # ---- User-profile scope ------------------------------------------------
 # User-profile categories apply ONLY when the user profile lives on $Drive.
 # On Linux/macOS there is a single '/' drive, so any '/' scan is the user drive.
-$isUserDrive = if ($script:IsWindows) {
+$isUserDrive = if ($script:IsWin) {
     $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase)
 } else {
     $Drive -eq '/'

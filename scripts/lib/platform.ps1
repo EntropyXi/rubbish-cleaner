@@ -6,10 +6,18 @@
 # gracefully degrades on pwsh 6+ / Linux / macOS.
 #
 # Exposes four module-scoped booleans, evaluated ONCE at dot-source time:
-#   $script:IsWindows - $true on Windows (PS 5.1 Desktop or Core)
-#   $script:IsLinux   - $true on Linux
-#   $script:IsMacOS   - $true on macOS
+#   $script:IsWin  - $true on Windows (PS 5.1 Desktop or Core)
+#   $script:IsLx   - $true on Linux
+#   $script:IsMac  - $true on macOS
 #   $script:IsCoreCLR - $true when running under PowerShell Core (pwsh 6+)
+#
+# NAMING NOTE: the short names ($script:IsWin / IsLx / IsMac) are a deliberate
+# departure from the built-in pwsh automatic variables $IsWindows/$IsLinux/
+# $IsMacOS, which are READ-ONLY on pwsh 7: assigning to a script-scoped
+# variable named after them (IsWindows / IsLinux / IsMacOS) throws
+# SessionStateUnauthorizedAccessException at dot-source time. Never reintroduce
+# the full automatic-variable names as assignable script-scoped variables in
+# this file.
 #
 # Detection: pwsh 6+ has built-in $IsWindows/$IsLinux/$IsMacOS; PS 5.1
 # Desktop falls back to [System.Environment]::OSVersion.Platform (Win32NT =>
@@ -19,29 +27,29 @@
 
 # --- One-time platform detection (module scope, no side effects) -----------
 
-$script:IsWindows = $false
-$script:IsLinux   = $false
-$script:IsMacOS   = $false
+$script:IsWin     = $false
+$script:IsLx      = $false
+$script:IsMac     = $false
 $script:IsCoreCLR = ($PSVersionTable.PSEdition -eq 'Core')
 
 if ($script:IsCoreCLR) {
     # PowerShell Core (pwsh 6+): built-in booleans are authoritative.
-    $script:IsWindows = [bool]$IsWindows
-    $script:IsLinux   = [bool]$IsLinux
-    $script:IsMacOS   = [bool]$IsMacOS
+    $script:IsWin = [bool]$IsWindows
+    $script:IsLx  = [bool]$IsLinux
+    $script:IsMac = [bool]$IsMacOS
 } else {
     # PowerShell 5.1 Desktop: derive from the .NET platform identifier.
     $platform = [System.Environment]::OSVersion.Platform
     if ($platform -eq [System.PlatformID]::Win32NT) {
-        $script:IsWindows = $true
+        $script:IsWin = $true
     } elseif ($platform -eq [System.PlatformID]::Unix) {
         # `uname -s`: "Linux" => Linux; "Darwin" => macOS.
         $unameOut = $null
         try { $unameOut = (& uname -s) } catch { $unameOut = $null }
         if ($unameOut -match 'Darwin') {
-            $script:IsMacOS = $true
+            $script:IsMac = $true
         } else {
-            $script:IsLinux = $true
+            $script:IsLx = $true
         }
     }
 }
@@ -51,7 +59,7 @@ if ($script:IsCoreCLR) {
 # Returns the fixed-drive root letters on Windows, e.g. @('C:\','D:\'),
 # or @('/') on Linux/macOS.
 function Get-FixedDriveLetters {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         return @(Get-PSDrive -PSProvider FileSystem |
             Where-Object { $_.Free -gt 0 } |
             ForEach-Object { $_.Root })
@@ -64,10 +72,10 @@ function Get-FixedDriveLetters {
 #   macOS   -> $env:HOME/Library/Caches
 #   Linux   -> $env:XDG_CACHE_HOME if set, else $env:HOME/.cache
 function Get-UserCacheDir {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         return $env:LOCALAPPDATA
     }
-    if ($script:IsMacOS) {
+    if ($script:IsMac) {
         return ($env:HOME + '/Library/Caches')
     }
     # Linux
@@ -81,7 +89,7 @@ function Get-UserCacheDir {
 #   Windows -> $env:TEMP
 #   Linux/macOS -> '/tmp'
 function Get-SystemTempDir {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         return $env:TEMP
     }
     return '/tmp'
@@ -91,7 +99,7 @@ function Get-SystemTempDir {
 #   Windows -> [Environment]::GetFolderPath('MyDocuments')
 #   Linux/macOS -> $env:HOME
 function Get-UserDocumentsDir {
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         return [System.Environment]::GetFolderPath('MyDocuments')
     }
     return $env:HOME

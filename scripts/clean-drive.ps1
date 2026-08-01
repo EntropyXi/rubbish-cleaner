@@ -366,7 +366,7 @@ if ($drivesGiven) {
     # Subprocess executable + prefix args (todo 8 platform branch): each
     # drive is cleaned by its OWN clean-drive.ps1 subprocess so the per-drive
     # behaviour is identical to single-drive mode.
-    if ($script:IsWindows) {
+    if ($script:IsWin) {
         $cleanExe = 'powershell.exe'
         $cleanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
     } else {
