@@ -164,11 +164,13 @@ function Get-UserCacheDir {
 function Get-SystemTempDir {
     $tempPath = [System.IO.Path]::GetTempPath()
     $rootPath = [System.IO.Path]::GetPathRoot($tempPath)
+    $trimmedPath = $tempPath.TrimEnd('\', '/')
+    $trimmedRoot = if ([string]::IsNullOrEmpty($rootPath)) { '' } else { $rootPath.TrimEnd('\', '/') }
     if (-not [string]::IsNullOrEmpty($rootPath) -and
-        [string]::Equals($tempPath, $rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        [string]::Equals($trimmedPath, $trimmedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $rootPath
     }
-    return $tempPath.TrimEnd('\', '/')
+    return $trimmedPath
 }
 
 # Returns the user documents directory:

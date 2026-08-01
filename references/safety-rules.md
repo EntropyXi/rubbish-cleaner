@@ -22,11 +22,11 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
 
 - **PS 5.1 的裸 `-Recurse` 会跟随 NTFS junction**（把 junction 当作真实子目录钻进去）。
   因此本流水线**从不使用裸 `-Recurse`**。
-- 递归全部手动实现（迭代栈或 `Test-DirEmpty` 递归函数），每一步检查
-  `Attributes -band [System.IO.FileAttributes]::ReparsePoint`，**reparse-point
-  子项一律跳过、绝不下钻**。
-- `Test-DirEmpty` 是 junction 感知的：只有"整棵树（排除 reparse-point 子项）无文件、
-  无非 junction 子目录"才返回 $true。
+- 递归全部手动实现（迭代栈或 `Test-DirEmpty` 递归函数），每个入口与子项都通过
+  `Test-IsJunction` 检查 Windows `ReparsePoint` 或 POSIX `LinkType`，**可遍历链接
+  一律跳过、绝不下钻**。
+- `Test-DirEmpty` 还会拒绝自身就是 junction / symbolic link 的路径；HardLink 是普通
+  文件内容，不会被当作可遍历链接跳过。
 - 该模式被 D 盘计划正式采用（d-drive-cleanup.md Task 2e/4a），防止误删通过
   junction 挂载的其他树。
 
