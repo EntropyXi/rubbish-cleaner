@@ -34,11 +34,15 @@ BeforeAll {
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
 
     # ---- extract + dot-source the classification seam --------------------
+    # NOTE: match the marker WITH the '# ' comment prefix (as the sandbox
+    # harness does) so the extracted block starts on a comment line; matching
+    # the bare '<...>' token makes the first line `<begin-classification>`,
+    # which PowerShell parses as a command -> "The term '<' is not recognized".
     $scanSource = [System.IO.File]::ReadAllText($script:ScanDrivePath)
-    $startIdx = $scanSource.IndexOf('<begin-classification>')
-    $endIdx = $scanSource.IndexOf('<end-classification>')
+    $startIdx = $scanSource.IndexOf('# <begin-classification>')
+    $endIdx = $scanSource.IndexOf('# <end-classification>')
     if ($startIdx -lt 0 -or $endIdx -lt 0) {
-        throw 'scan-drive.ps1 classification markers (<begin-classification>/<end-classification>) not found'
+        throw 'scan-drive.ps1 classification markers (# <begin-classification>/# <end-classification>) not found'
     }
     $classBlock = $scanSource.Substring($startIdx, $endIdx - $startIdx)
     . ([scriptblock]::Create($classBlock))

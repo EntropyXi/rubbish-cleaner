@@ -12,19 +12,24 @@
 # and are removed in AfterAll (own suite dir first, then empty <pid> and
 # parent ancestors on a best-effort basis).
 
-. (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
-
-function New-TestDir {
-    param([string]$Name)
-    $p = Join-Path $script:SuiteRoot $Name
-    New-Item -ItemType Directory -Path $p -Force | Out-Null
-    return $p
-}
-
 BeforeAll {
     # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
     # set during discovery are NULL in the run phase, so paths built here).
     $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\core" -f $PID)
+
+    # Dot-source the lib INSIDE BeforeAll: Pester 5 runs the file's top level
+    # during DISCOVERY in a scope discarded before the run phase, so lib
+    # functions (Test-DirEmpty, Test-IsJunction, ...) must be imported in the
+    # run phase to be visible to It blocks.
+    . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
+
+    # Helper defined INSIDE BeforeAll for the same scoping reason.
+    function New-TestDir {
+        param([string]$Name)
+        $p = Join-Path $script:SuiteRoot $Name
+        New-Item -ItemType Directory -Path $p -Force | Out-Null
+        return $p
+    }
 
     # One reparse point shared by the Test-DirEmpty and Test-IsJunction
     # suites. Junction first (no admin rights needed on Windows); fall back to

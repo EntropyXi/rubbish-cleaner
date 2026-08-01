@@ -21,13 +21,6 @@
 # subprocess checks run against real fixed drives read-only with a tiny
 # category filter.
 
-function New-TestDir {
-    param([string]$Name)
-    $p = Join-Path $script:SuiteRoot $Name
-    New-Item -ItemType Directory -Path $p -Force | Out-Null
-    return $p
-}
-
 BeforeAll {
     # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
     # set during discovery are NULL in the run phase, so paths built here).
@@ -36,15 +29,29 @@ BeforeAll {
     $script:SchedulePath   = Join-Path $PSScriptRoot '..\..\scripts\schedule.ps1'
     $script:PolicyDir      = Join-Path $PSScriptRoot '..\..\references\policies'
 
+    # Helper defined INSIDE BeforeAll: Pester 5 runs the file's top level during
+    # DISCOVERY in a scope discarded before the run phase, so functions must be
+    # created in the run phase to be visible to It blocks.
+    function New-TestDir {
+        param([string]$Name)
+        $p = Join-Path $script:SuiteRoot $Name
+        New-Item -ItemType Directory -Path $p -Force | Out-Null
+        return $p
+    }
+
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\platform.ps1')
 
     # ---- extract + dot-source the classification seam (as scan.Tests.ps1) --
+    # NOTE: match the marker WITH the '# ' comment prefix (as the sandbox
+    # harness does) so the extracted block starts on a comment line; matching
+    # the bare '<...>' token makes the first line `<begin-classification>`,
+    # which PowerShell parses as a command -> "The term '<' is not recognized".
     $scanSource = [System.IO.File]::ReadAllText($script:ScanDrivePath)
-    $startIdx = $scanSource.IndexOf('<begin-classification>')
-    $endIdx   = $scanSource.IndexOf('<end-classification>')
+    $startIdx = $scanSource.IndexOf('# <begin-classification>')
+    $endIdx   = $scanSource.IndexOf('# <end-classification>')
     if ($startIdx -lt 0 -or $endIdx -lt 0) {
-        throw 'scan-drive.ps1 classification markers (<begin-classification>/<end-classification>) not found'
+        throw 'scan-drive.ps1 classification markers (# <begin-classification>/# <end-classification>) not found'
     }
     $classBlock = $scanSource.Substring($startIdx, $endIdx - $startIdx)
     . ([scriptblock]::Create($classBlock))

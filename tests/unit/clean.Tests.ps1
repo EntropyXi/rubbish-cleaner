@@ -11,35 +11,39 @@
 # Pester 5 syntax ONLY (BeforeAll / It / Should -Be / -BeTrue); no Pester-3-only
 # patterns (Describe tagging / Context-only usage).
 
-. (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
-
-# Parse the pipe-delimited cleanup CSV written by the lib functions.
-function Get-CleanupRowsFrom {
-    param([string]$CsvPath)
-    if (-not (Test-Path -LiteralPath $CsvPath)) { return @() }
-    $rows = @()
-    $lines = [System.IO.File]::ReadAllLines($CsvPath)
-    for ($i = 1; $i -lt $lines.Count; $i++) {
-        $p = $lines[$i] -split '\|'
-        if ($p.Count -lt 6) { continue }
-        $rows += [pscustomobject]@{
-            Timestamp    = $p[0]
-            Phase        = $p[1]
-            Action       = $p[2]
-            Path         = $p[3]
-            ErrorMessage = (($p[4..($p.Count - 2)]) -join '|')
-            Disposition  = $p[-1]
-        }
-    }
-    return $rows
-}
-
 BeforeAll {
     # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
     # set during discovery are NULL in the run phase, so paths built here).
     $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\clean" -f $PID)
     $script:CleanupCsv = Join-Path $script:SuiteRoot 'cleanup-errors.csv'
     New-Item -ItemType Directory -Path $script:SuiteRoot -Force | Out-Null
+
+    # Dot-source the lib and define the CSV helper INSIDE BeforeAll: Pester 5
+    # runs the file's top level during DISCOVERY in a scope that is discarded
+    # before the run phase, so lib functions (Invoke-SafeRemove etc.) and this
+    # helper must be created in the run phase to be visible to It blocks.
+    . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
+
+    # Parse the pipe-delimited cleanup CSV written by the lib functions.
+    function Get-CleanupRowsFrom {
+        param([string]$CsvPath)
+        if (-not (Test-Path -LiteralPath $CsvPath)) { return @() }
+        $rows = @()
+        $lines = [System.IO.File]::ReadAllLines($CsvPath)
+        for ($i = 1; $i -lt $lines.Count; $i++) {
+            $p = $lines[$i] -split '\|'
+            if ($p.Count -lt 6) { continue }
+            $rows += [pscustomobject]@{
+                Timestamp    = $p[0]
+                Phase        = $p[1]
+                Action       = $p[2]
+                Path         = $p[3]
+                ErrorMessage = (($p[4..($p.Count - 2)]) -join '|')
+                Disposition  = $p[-1]
+            }
+        }
+        return $rows
+    }
 }
 
 Describe 'Invoke-SafeRemove' {
