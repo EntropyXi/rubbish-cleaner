@@ -47,14 +47,16 @@
 # by this script (report-only, matching the scan's own description).
 
 param(
-    [Parameter(Mandatory)][string]$Drive,                         # e.g. 'D:' (gates elevated-system)
+    [string]$Drive,                                               # e.g. 'D:' (single-drive mode; gates elevated-system)
+    [string[]]$Drives,                                            # todo 8: multi-drive batch, e.g. @('D:','E:')
     [string]$CandidatesCsv,                                       # default: newest <OutDir>\<Drive>-*\candidates.csv
     [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner",
-    [string]$QuarantineDir = "$env:USERPROFILE\Desktop\.omo\quarantine\$($Drive.TrimEnd(':'))",
+    [string]$QuarantineDir,                                       # default: <out>\Desktop\.omo\quarantine\<letter> (computed per drive)
     [switch]$Yes,                                                 # approve ASK categories + run the elevated batch (no prompts)
     [string[]]$Categories,                                        # filter; empty = all categories present in the CSV
     [switch]$SkipElevated,                                        # test/CI-safe: prepare <run>\elevated.ps1 but NEVER launch UAC
-    [switch]$Resume                                               # todo 4: resume from <run>\clean-checkpoint.json
+    [switch]$Resume,                                              # todo 4: resume from <run>\clean-checkpoint.json
+    [switch]$Parallel                                             # todo 8: accepted but IGNORED (cleaning is always sequential)
 )
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
@@ -335,6 +337,67 @@ function Write-CleanCheckpoint {
 # <begin-main>
 # =====================================================================
 
+# =====================================================================
+# todo 8: multi-drive batch mode (-Drives D:,E:).
+# -Parallel is ACCEPTED but IGNORED: deletion must NEVER be parallelized.
+# Drives are cleaned STRICTLY SEQUENTIALLY (one subprocess at a time).
+# =====================================================================
+$driveGiven  = -not [string]::IsNullOrEmpty($Drive)
+$drivesGiven = ($null -ne $Drives) -and @($Drives).Count -gt 0
+if (-not $driveGiven -and -not $drivesGiven) {
+    Write-Error "Must specify either -Drive or -Drives"
+    exit 1
+}
+if ($driveGiven -and $drivesGiven) {
+    Write-Error "Specify only one of -Drive or -Drives (mutual exclusion)"
+    exit 1
+}
+if ($Parallel.IsPresent) {
+    Write-Output "parallel clean is disabled for safety — cleaning drives sequentially"
+}
+
+if ($drivesGiven) {
+    $driveList = @($Drives | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+    if ($driveList.Count -eq 0) {
+        Write-Error "No drives specified in -Drives"
+        exit 1
+    }
+
+    # Subprocess executable + prefix args (todo 8 platform branch): each
+    # drive is cleaned by its OWN clean-drive.ps1 subprocess so the per-drive
+    # behaviour is identical to single-drive mode.
+    if ($script:IsWindows) {
+        $cleanExe = 'powershell.exe'
+        $cleanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
+    } else {
+        $cleanExe = 'pwsh'
+        $cleanPfx = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
+    }
+
+    $anyFailed = $false
+    foreach ($d in $driveList) {
+        $a = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $cleanPfx) { [void]$a.Add($p) }
+        [void]$a.Add('-Drive');  [void]$a.Add($d)
+        [void]$a.Add('-OutDir'); [void]$a.Add($OutDir)
+        if ($Yes.IsPresent)            { [void]$a.Add('-Yes') }
+        if ($SkipElevated.IsPresent)   { [void]$a.Add('-SkipElevated') }
+        if ($Resume.IsPresent)         { [void]$a.Add('-Resume') }
+        if ($Categories)               { [void]$a.Add('-Categories'); [void]$a.Add((@($Categories | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) -join ',')) }
+        if ($QuarantineDir)            { [void]$a.Add('-QuarantineDir'); [void]$a.Add($QuarantineDir) }
+
+        # Per-drive timestamp markers: drive B START must be strictly later
+        # than drive A END (the sequential guarantee tests assert on).
+        Write-Output ("[CLEAN START {0}] {1}" -f $d, (Get-Date -Format o))
+        & $cleanExe @($a.ToArray())
+        $code = $LASTEXITCODE
+        Write-Output ("[CLEAN END {0}] {1} (exit {2})" -f $d, (Get-Date -Format o), $code)
+        if ($code -ne 0) { $anyFailed = $true }
+    }
+    if ($anyFailed) { exit 1 }
+    exit 0
+}
+
 # ---- Drive validation (same gates as scan-drive.ps1) ------------------
 # 1. syntax: ^[A-Za-z]:$
 if ($Drive -notmatch '^[A-Za-z]:$') {
@@ -361,6 +424,9 @@ if ($null -eq $vol -or $vol.DriveType -ne 'Fixed') {
 $isUserDrive  = $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase)
 # System drive? (the elevated batch may ONLY be launched here).
 $isSystemDrive = ($driveLetter -ieq $env:SystemDrive.TrimEnd(':'))
+# Default quarantine dir is derived per drive. Evaluated lazily (not at
+# param-binding time) so -Drives mode never needs a -Drive to expand it.
+if (-not $QuarantineDir) { $QuarantineDir = "$env:USERPROFILE\Desktop\.omo\quarantine\$($Drive.TrimEnd(':'))" }
 
 # ---- Locate candidates.csv ---------------------------------------------
 # Default: newest <OutDir>\<Drive>-*\candidates.csv (Get-ChildItem sorted by
