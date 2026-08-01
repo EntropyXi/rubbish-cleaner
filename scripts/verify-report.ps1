@@ -35,7 +35,8 @@
 # from $Drive / $RunDir / $env:USERPROFILE.
 
 param(
-    [Parameter(Mandatory)][string]$Drive,                       # e.g. 'D:'
+    [string]$Drive,                                             # e.g. 'D:' (single-drive mode)
+    [string[]]$Drives,                                          # todo 8: multi-drive batch, e.g. @('D:','E:')
     [string]$RunDir,                                            # run dir from scan/clean, e.g. <OutDir>\D-<timestamp>; newest under $OutDir when omitted
     [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner"
 )
@@ -48,6 +49,20 @@ $utf8NoBom      = New-Object System.Text.UTF8Encoding($false)
 
 function Format-Bytes([long]$Bytes) { return ('{0:N0}' -f $Bytes) }
 function Format-GiB([long]$Bytes)    { return ('{0:N2} GiB' -f ($Bytes / 1GB)) }
+
+# =====================================================================
+# Single-drive verification is wrapped in a function so multi-drive mode
+# (-Drives) can call it once per drive and combine the per-drive results.
+# Error paths (Write-Error + exit 1) are preserved verbatim from the
+# original top-level body; `exit` inside the function still exits the
+# whole script, exactly as before.
+# =====================================================================
+function Invoke-DriveVerify {
+    param(
+        [string]$Drive,
+        [string]$RunDir,
+        [string]$OutDir
+    )
 
 # =====================================================================
 # (0) validate the drive and resolve the run directory
@@ -233,7 +248,7 @@ $totalAssert  = $assertions.Count
 # build <RunDir>\summary.md (exactly the 8 required sections)
 # =====================================================================
 $L = New-Object System.Collections.Generic.List[string]
-function Add-SummaryLine([string]$Text) { $script:L.Add($Text) | Out-Null }
+function Add-SummaryLine([string]$Text) { $L.Add($Text) | Out-Null }
 
 Add-SummaryLine ("# {0}-Drive Cleanup - Post-Run Summary" -f $driveLetter)
 Add-SummaryLine ''
@@ -399,6 +414,88 @@ Add-SummaryLine ''
 $summaryPath = Join-Path $RunDir 'summary.md'
 [System.IO.File]::WriteAllLines($summaryPath, $L.ToArray(), $utf8NoBom)
 
-Write-Output "verify-report: summary written to $summaryPath"
-if ($scanOnly) { Write-Output 'verify-report: scan-only run (no cleanup-errors.csv found) - no freed numbers reported' }
+# The informational lines ("summary written to ...") are emitted by the
+# CALLER so neither single-drive nor multi-drive capture swallows them.
+return [pscustomobject]@{
+    Drive        = $Drive
+    RunDir       = $RunDir
+    SummaryPath  = $summaryPath
+    ScanOnly     = $scanOnly
+    FinalFree    = [long]$finalFree
+    BaselineFree = [long]$baselineFree
+    TotalFreed   = $(if ($scanOnly) { $null } else { [long]($finalFree - $baselineFree) })
+    PassCount    = [int]$passCount
+    FailCount    = [int]$failCount
+    EstFreed     = [long]$estFreedTotal
+}
+}
+
+# =====================================================================
+# todo 8: multi-drive batch mode (-Drives D:,E:) - combined summary.
+# Walks each drive's latest run dir (per-drive verify inside
+# Invoke-DriveVerify) and writes one combined summary.md.
+# =====================================================================
+$driveGiven  = -not [string]::IsNullOrEmpty($Drive)
+$drivesGiven = ($null -ne $Drives) -and @($Drives).Count -gt 0
+if (-not $driveGiven -and -not $drivesGiven) {
+    Write-Error "Must specify either -Drive or -Drives"
+    exit 1
+}
+if ($driveGiven -and $drivesGiven) {
+    Write-Error "Specify only one of -Drive or -Drives (mutual exclusion)"
+    exit 1
+}
+
+if ($drivesGiven) {
+    $driveList = @($Drives | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+    if ($driveList.Count -eq 0) {
+        Write-Error "No drives specified in -Drives"
+        exit 1
+    }
+
+    $multiRoot = Join-Path $OutDir ("multidrive-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Force -Path $multiRoot | Out-Null
+
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($d in $driveList) {
+        $res = Invoke-DriveVerify -Drive $d -RunDir $null -OutDir $OutDir
+        Write-Output "verify-report: summary written to $($res.SummaryPath)"
+        [void]$rows.Add($res)
+    }
+
+    # ---- combined multi-drive summary --------------------------------
+    $L = New-Object System.Collections.Generic.List[string]
+    function Add-SummaryLine([string]$Text) { $L.Add($Text) | Out-Null }
+
+    Add-SummaryLine '# Multi-Drive Verification Summary'
+    Add-SummaryLine ''
+    Add-SummaryLine ("Generated: {0} - Mode: READ-ONLY verification across {1} drive(s)" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $rows.Count)
+    Add-SummaryLine ''
+    Add-SummaryLine '## Per-Drive Results'
+    Add-SummaryLine ''
+    Add-SummaryLine '| Drive | RunDir | Scan-Only | Freed Bytes | Assertions |'
+    Add-SummaryLine '|-------|--------|-----------|-------------|------------|'
+    $totFreed = 0L; $totPass = 0; $totFail = 0
+    foreach ($r in $rows) {
+        $freedStr = if ($r.ScanOnly -or $null -eq $r.TotalFreed) { 'n/a (scan-only)' } else { ('{0:N0}' -f $r.TotalFreed) }
+        Add-SummaryLine ("| {0} | ``{1}`` | {2} | {3} | {4}/{5} PASS |" -f $r.Drive, $r.RunDir, $(if ($r.ScanOnly) { 'yes' } else { 'no' }), $freedStr, $r.PassCount, ($r.PassCount + $r.FailCount))
+        if (-not $r.ScanOnly -and $null -ne $r.TotalFreed) { $totFreed += [long]$r.TotalFreed }
+        $totPass += [int]$r.PassCount; $totFail += [int]$r.FailCount
+    }
+    Add-SummaryLine ''
+    Add-SummaryLine ("Total freed across drives: **{0:N0} bytes**" -f $totFreed)
+    Add-SummaryLine ("Total assertions: **{0}/{1} PASS**" -f $totPass, ($totPass + $totFail))
+    Add-SummaryLine ''
+    Add-SummaryLine 'Each drive''s detailed 8-section summary.md lives in its own run directory (see the RunDir column above).'
+
+    $summaryPath = Join-Path $multiRoot 'summary.md'
+    [System.IO.File]::WriteAllLines($summaryPath, $L.ToArray(), $utf8NoBom)
+    Write-Output "verify-report: multi-drive summary written to $summaryPath"
+    exit 0
+}
+
+# ---- single-drive mode (existing behaviour unchanged) --------------------
+$res = Invoke-DriveVerify -Drive $Drive -RunDir $RunDir -OutDir $OutDir
+Write-Output "verify-report: summary written to $($res.SummaryPath)"
+if ($res.ScanOnly) { Write-Output 'verify-report: scan-only run (no cleanup-errors.csv found) - no freed numbers reported' }
 exit 0

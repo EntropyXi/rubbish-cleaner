@@ -24,12 +24,19 @@
 #                      ELEVATED->report-only.
 #   scan-report.json   per category: { name, risk, candidates[] }
 
+[CmdletBinding(DefaultParameterSetName = 'SingleDrive')]
 param(
-    [Parameter(Mandatory)][string]$Drive,                       # e.g. 'D:'
+    [Parameter(ParameterSetName = 'SingleDrive')]
+    [Parameter(ParameterSetName = 'MultiDrive')]
+    [string]$Drive = $null,                                     # e.g. 'D:' (single-drive mode)
+    [Parameter(ParameterSetName = 'MultiDrive')]
+    [Parameter(ParameterSetName = 'SingleDrive')]
+    [string[]]$Drives = $null,                                  # todo 8: multi-drive batch, e.g. @('D:','E:')
     [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner",
     [switch]$IncludeElevated,                                   # enable elevated-system (report-only)
     [string[]]$Categories,                                      # filter; empty = all applicable
-    [switch]$Resume                                             # todo 4: resume from <run>\scan-checkpoint.json
+    [switch]$Resume,                                            # todo 4: resume from <run>\scan-checkpoint.json
+    [switch]$Parallel                                           # todo 8: run per-drive subprocesses concurrently
 )
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
@@ -960,6 +967,177 @@ function Get-JunkCandidates {
 # =====================================================================
 # <begin-main>
 # =====================================================================
+
+# =====================================================================
+# todo 8: multi-drive batch mode (-Drives D:,E:).
+# Both -Drive and -Drives are NON-mandatory ($null default) so the custom
+# presence / mutual-exclusion errors fire before PowerShell's own binding
+# error. When -Drives is used, each drive is scanned by its OWN subprocess
+# (no in-process scope isolation) - Windows -> powershell.exe, Linux/macOS
+# -> pwsh, selected via platform.ps1's $script:IsWindows.
+# =====================================================================
+$driveGiven  = -not [string]::IsNullOrEmpty($Drive)
+$drivesGiven = ($null -ne $Drives) -and @($Drives).Count -gt 0
+if (-not $driveGiven -and -not $drivesGiven) {
+    Write-Error "Must specify either -Drive or -Drives"
+    exit 1
+}
+if ($driveGiven -and $drivesGiven) {
+    Write-Error "Specify only one of -Drive or -Drives (mutual exclusion)"
+    exit 1
+}
+
+if ($drivesGiven) {
+    $driveList = @($Drives | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+    if ($driveList.Count -eq 0) {
+        Write-Error "No drives specified in -Drives"
+        exit 1
+    }
+
+    # Combined summary dir: <OutDir>\multidrive-<timestamp>\drives.csv
+    $multiRoot = Join-Path $OutDir ("multidrive-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    New-Item -ItemType Directory -Force -Path $multiRoot | Out-Null
+
+    # Subprocess executable + prefix args (todo 8 platform branch).
+    if ($script:IsWindows) {
+        $scanExe = 'powershell.exe'
+        $scanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
+    } else {
+        $scanExe = 'pwsh'
+        $scanPfx = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
+    }
+
+    # Builds the argument list handed to one per-drive scan subprocess.
+    function New-ScanSubprocessArgs {
+        param([string]$DriveArg)
+        $a = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $scanPfx) { [void]$a.Add($p) }
+        [void]$a.Add('-Drive');  [void]$a.Add($DriveArg)
+        [void]$a.Add('-OutDir'); [void]$a.Add($OutDir)
+        if ($IncludeElevated.IsPresent) { [void]$a.Add('-IncludeElevated') }
+        if ($Categories) { [void]$a.Add('-Categories'); [void]$a.Add((@($Categories | ForEach-Object { $_ -split ',' } | Where-Object { $_ }) -join ',')) }
+        if ($Resume.IsPresent) { [void]$a.Add('-Resume') }
+        return $a.ToArray()
+    }
+
+    # Resolves the per-drive run dir produced by the finished subprocess
+    # (the NEWEST <Letter>-* dir under $OutDir for that drive).
+    function Resolve-DriveRunDir {
+        param([string]$DriveArg)
+        $prefix = if ($script:IsWindows) { $DriveArg.TrimEnd(':').ToUpperInvariant() } else { $DriveArg.TrimEnd(':') }
+        $dir = @(Get-ChildItem -LiteralPath $OutDir -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "$prefix-*" } |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if ($dir.Count -eq 0) { return $null }
+        return $dir[0].FullName
+    }
+
+    function Get-CandidateTotals {
+        param([string]$RunDirArg)
+        if ([string]::IsNullOrEmpty($RunDirArg)) { return @{ Count = 0; Bytes = 0L } }
+        $csv = Join-Path $RunDirArg 'candidates.csv'
+        if (-not (Test-Path -LiteralPath $csv -PathType Leaf)) { return @{ Count = 0; Bytes = 0L } }
+        $count = 0; $bytes = 0L
+        $lines = [System.IO.File]::ReadAllLines($csv)
+        for ($i = 1; $i -lt $lines.Count; $i++) {
+            $p = $lines[$i] -split '\|'
+            if ($p.Count -lt 6) { continue }
+            $count++
+            $s = 0L; [void][long]::TryParse($p[3], [ref]$s); $bytes += $s
+        }
+        return @{ Count = $count; Bytes = $bytes }
+    }
+
+    # Builds one drives.csv row, records the aggregate failure flag.
+    function Add-DriveScanResult {
+        param([string]$DriveArg, [int]$ExitCode, [System.Collections.Generic.List[object]]$Results)
+        $runDir = Resolve-DriveRunDir -DriveArg $DriveArg
+        $totals = Get-CandidateTotals -RunDirArg $runDir
+        if ($ExitCode -ne 0) { $script:anyFailed = $true }
+        [void]$Results.Add([pscustomobject]@{
+            Drive          = $DriveArg
+            RunDir         = $(if ($runDir) { $runDir } else { '' })
+            ExitCode       = $ExitCode
+            Status         = $(if ($ExitCode -eq 0) { 'OK' } else { 'FAIL' })
+            Candidates     = $totals.Count
+            CandidateBytes = $totals.Bytes
+        })
+    }
+
+    $results   = New-Object System.Collections.Generic.List[object]
+    $script:anyFailed = $false
+
+    if ($Parallel.IsPresent) {
+        # ---- concurrent per-drive subprocesses --------------------------
+        if ($script:IsCoreCLR) {
+            # pwsh 7: Start-Process -PassThru per drive, output redirected to
+            # per-drive logs, then WaitForExit for all.
+            $procs = New-Object System.Collections.Generic.List[object]
+            $procDrives = New-Object System.Collections.Generic.List[string]
+            foreach ($d in $driveList) {
+                $argsArr   = New-ScanSubprocessArgs -DriveArg $d
+                $outLog    = Join-Path $multiRoot ("{0}-scan.out.log" -f $(if ($script:IsWindows) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
+                $errLog    = Join-Path $multiRoot ("{0}-scan.err.log" -f $(if ($script:IsWindows) { $d.TrimEnd(':').ToUpperInvariant() } else { 'ROOT' }))
+                $argLine   = (($argsArr | ForEach-Object { if ($_ -match '[\s"]') { '"' + $_.Replace('"', '""') + '"' } else { $_ } }) -join ' ')
+                [void]$procDrives.Add($d)
+                [void]$procs.Add((Start-Process -FilePath $scanExe -ArgumentList $argLine -PassThru -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog))
+            }
+            for ($i = 0; $i -lt $procs.Count; $i++) {
+                $procs[$i].WaitForExit()
+                $procs[$i].Refresh()
+                $code = $(if ($null -ne $procs[$i].ExitCode) { [int]$procs[$i].ExitCode } else { 1 })
+                Add-DriveScanResult -DriveArg $procDrives[$i] -ExitCode $code -Results $results
+            }
+        } else {
+            # PS 5.1: Start-Job per drive (one powershell process each); the
+            # job echoes a SUBEXIT= marker so the parent can read the code.
+            $jobs = New-Object System.Collections.Generic.List[object]
+            $jobDrives = New-Object System.Collections.Generic.List[string]
+            foreach ($d in $driveList) {
+                $argsArr = New-ScanSubprocessArgs -DriveArg $d
+                [void]$jobDrives.Add($d)
+                [void]$jobs.Add((Start-Job -ScriptBlock {
+                        param($exePath, $argList)
+                        & $exePath @argList
+                        Write-Output "SUBEXIT=$LASTEXITCODE"
+                    } -ArgumentList $scanExe, $argsArr))
+            }
+            if ($jobs.Count -gt 0) { $null = Wait-Job -Job $jobs }
+            for ($i = 0; $i -lt $jobs.Count; $i++) {
+                $jobOut = @(Receive-Job -Job $jobs[$i])
+                $joined = ($jobOut -join "`n")
+                $code = if ($joined -match 'SUBEXIT=(\d+)') { [int]$matches[1] } else { 1 }
+                foreach ($line in $jobOut) { if ($line) { Write-Output $line } }
+                Add-DriveScanResult -DriveArg $jobDrives[$i] -ExitCode $code -Results $results
+            }
+            foreach ($j in $jobs) { Remove-Job -Job $j -Force }
+        }
+    } else {
+        # ---- sequential per-drive subprocesses (default) ----------------
+        foreach ($d in $driveList) {
+            $argsArr = New-ScanSubprocessArgs -DriveArg $d
+            & $scanExe @argsArr
+            Add-DriveScanResult -DriveArg $d -ExitCode $LASTEXITCODE -Results $results
+        }
+    }
+
+    # ---- combined summary: <multiRoot>\drives.csv -----------------------
+    $csvLines = New-Object System.Collections.Generic.List[string]
+    $csvLines.Add('Drive|RunDir|ExitCode|Status|Candidates|CandidateBytes')
+    foreach ($r in $results) {
+        $csvLines.Add(('{0}|{1}|{2}|{3}|{4}|{5}' -f $r.Drive, $r.RunDir, $r.ExitCode, $r.Status, $r.Candidates, $r.CandidateBytes))
+    }
+    $csvPath = Join-Path $multiRoot 'drives.csv'
+    [System.IO.File]::WriteAllLines($csvPath, $csvLines.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
+
+    Write-Output "MULTI-DRIVE SCAN COMPLETE: $($results.Count) drive(s) scanned."
+    foreach ($r in $results) {
+        Write-Output ("  {0}: {1} (exit {2}) -> {3}" -f $r.Drive, $r.Status, $r.ExitCode, $(if ($r.RunDir) { $r.RunDir } else { '<no run dir>' }))
+    }
+    Write-Output "DRIVES CSV: $csvPath"
+    if ($script:anyFailed) { exit 1 }
+    exit 0
+}
 
 # ---- Drive validation -------------------------------------------------
 # 1. syntax: ^[A-Za-z]:$
