@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v1.1.0] - 2026-08-01
+
+### Added
+
+- Added multi-drive batch execution with `-Drives` for [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1), [`scripts/clean-drive.ps1`](scripts/clean-drive.ps1), and [`scripts/verify-report.ps1`](scripts/verify-report.ps1). The optional `scan-drive.ps1 -Parallel` path scans multiple drives concurrently, and scan and cleanup deliver category-level progress; cleanup remains sequential and approval-gated.
+- Added scan and cleanup checkpoints with `-Resume`, plus policy-based scheduling through [`scripts/schedule.ps1`](scripts/schedule.ps1) and the [`references/policies/`](references/policies/) profiles.
+
+### Changed
+
+- Added fixed-drive resolution, platform-specific default paths, and PowerShell host selection through [`scripts/lib/platform.ps1`](scripts/lib/platform.ps1), so supported Windows, Linux, and macOS hosts use the appropriate drive and runtime semantics.
+- Updated [`scripts/lib/rubbish-core.ps1`](scripts/lib/rubbish-core.ps1) for POSIX link handling and locked-item behavior.
+
+### Fixed
+
+- Prevented duplicate root-temp evaluation and normalized system temp roots while preserving repeated path separators.
+- Kept the production scripts parseable in Windows PowerShell 5.1.
+
+### Testing
+
+- Made Pester pass/fail results explicit in [`tests/run-tests.ps1`](tests/run-tests.ps1) and [`.github/workflows/test.yml`](.github/workflows/test.yml).
+- Expanded CI to a Windows, Ubuntu, and macOS matrix, including the Windows PowerShell 5.1 test entry point.
+
 ## [v1.0.0] - 2026-07-31
 
 ### Added

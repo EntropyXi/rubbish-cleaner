@@ -4,6 +4,28 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [v1.1.0] - 2026-08-01
+
+### 新增
+
+- 为 [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1)、[`scripts/clean-drive.ps1`](scripts/clean-drive.ps1) 和 [`scripts/verify-report.ps1`](scripts/verify-report.ps1) 增加了使用 `-Drives` 的多驱动器批量执行。可选的 `scan-drive.ps1 -Parallel` 路径会并发扫描多个驱动器，扫描和清理会按类别发布进度；清理仍按顺序执行且必须获得批准。
+- 增加了扫描和清理检查点及 `-Resume`，并通过 [`scripts/schedule.ps1`](scripts/schedule.ps1) 和 [`references/policies/`](references/policies/) 配置文件提供基于策略的计划任务。
+
+### 变更
+
+- 通过 [`scripts/lib/platform.ps1`](scripts/lib/platform.ps1) 增加固定驱动器解析、平台特定的默认路径和 PowerShell 主机选择，使受支持的 Windows、Linux 和 macOS 主机采用相应的驱动器与运行时语义。
+- 更新了 [`scripts/lib/rubbish-core.ps1`](scripts/lib/rubbish-core.ps1)，以支持 POSIX 链接处理和被锁定项目的行为。
+
+### 修复
+
+- 防止重复评估根临时目录，并规范化系统临时目录根路径，同时保留重复的路径分隔符。
+- 保持生产脚本可由 Windows PowerShell 5.1 解析。
+
+### 测试
+
+- 在 [`tests/run-tests.ps1`](tests/run-tests.ps1) 和 [`.github/workflows/test.yml`](.github/workflows/test.yml) 中明确 Pester 的通过/失败结果。
+- 将 CI 扩展为 Windows、Ubuntu 和 macOS 矩阵，并包含 Windows PowerShell 5.1 测试入口。
+
 ## [v1.0.0] - 2026-07-31
 
 ### 新增
