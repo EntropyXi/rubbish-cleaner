@@ -84,7 +84,9 @@ rubbish-cleaner/
 │   ├── scan-drive.ps1                  # 只读扫描 + 分类（阶段 1）
 │   ├── clean-drive.ps1                 # 审批门控清理 + 隔离（阶段 3）
 │   ├── verify-report.ps1               # 校验 + 汇总报告（阶段 4）
+│   ├── schedule.ps1                    # 基于策略的平台定时任务集成
 │   └── lib/
+│       ├── platform.ps1                # 平台路径、固定盘和宿主程序辅助函数
 │       └── rubbish-core.ps1            # 安全函数库（分类/隔离/报告）
 ├── references/
 │   ├── junk-taxonomy.md                # 垃圾文件分类法
@@ -96,14 +98,15 @@ rubbish-cleaner/
     │   ├── scan.Tests.ps1              # Pester 5 单元测试（扫描分类）
     │   ├── clean.Tests.ps1             # Pester 5 单元测试（安全删除+隔离）
     │   ├── core.Tests.ps1              # Pester 5 单元测试（核心库）
-    │   └── report.Tests.ps1            # Pester 5 单元测试（报告）
+    │   ├── report.Tests.ps1            # Pester 5 单元测试（报告）
+    │   └── optimization.Tests.ps1      # Pester 5 单元测试（批量和断点续扫）
     └── sandbox/
-        └── run-sandbox-tests.ps1       # 零依赖回退 harness（无 Pester 时）
+        └── run-sandbox-tests.ps1       # 零依赖回退 harness（九个套件）
 ```
 
 ## 测试
 
-测试套件是**双模式**的，会按条件选择执行器：
+本地测试入口是**双模式**的，会按条件选择执行器：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\run-tests.ps1
@@ -111,38 +114,37 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
 
 - **模式 0（总是先执行）：** 通过 `[System.Management.Automation.Language.Parser]::ParseFile` 对 `scripts/` 和 `tests/` 下所有 `.ps1` 做语法解析检查；只要发现解析错误，就会在任何分支执行前以退出码 1 退出。
 - **模式 1（分支）：**
-  - **已安装 Pester 5.x** → 打印 `BRANCH: PESTER`，并通过 `Invoke-Pester -PassThru` 运行四个 `tests/unit/*.Tests.ps1` 套件；只有全部通过才以 0 退出。
-  - **未安装 Pester 5.x** → 打印 `BRANCH: SANDBOX`，转交给零依赖 harness `tests/sandbox/run-sandbox-tests.ps1`（纯 PowerShell 断言，同样的四个套件，在 `$env:TEMP\rubbish-cleaner-tests\<pid>` 下自建并清理自己的临时目录树），透传其退出码。
+  - **已安装 Pester 5.x** → 打印 `BRANCH: PESTER`，并通过 `Invoke-Pester -PassThru` 运行五个 `tests/unit/*.Tests.ps1` 文件中的 55 个测试；只有全部通过才以 0 退出。
+  - **未安装 Pester 5.x** → 打印 `BRANCH: SANDBOX`，转交给零依赖 `tests/sandbox/run-sandbox-tests.ps1` harness（九个纯 PowerShell 套件，在 `$env:TEMP\rubbish-cleaner-tests\<pid>` 下自建并清理自己的临时目录树），透传其退出码。
 
-无论走哪条分支，四个行为套件（扫描分类、安全删除+隔离、空目录检测、报告夹具）都会被覆盖。退出码 0 表示所有断言通过。
+GitHub Actions 在 Windows、Ubuntu 和 macOS 上运行语法解析检查、Pester 和 sandbox harness；Windows 还会通过 Windows PowerShell 5.1 运行完整测试入口。退出码 0 表示所选断言全部通过。
 
-## 当前不足
+## 当前状态
 
-- ✅ ~~Windows-only：基于 PowerShell 5.1，尚无 pwsh 7（PowerShell Core）与 Linux/macOS 支持~~ —— 现已支持 Windows（PS 5.1 + pwsh 7）与 Linux/macOS（pwsh 7），详见 [SKILL.md](SKILL.md) 的「平台支持」
-- ✅ ~~双模式测试的 Pester 分支：本机无 Pester 5.x 时只能做语法解析校验（sandbox harness 是主执行路径）~~ —— GitHub Actions CI 现已预装 Pester 5.x 运行该分支
-- ✅ ~~沙盒测试夹具中硬编码了 `-Drive D:`（ReportFixture 与清理门控套件），无固定 D 盘的机器需参数化~~ —— 夹具现已自动探测测试盘（Windows 取首个固定盘，其他平台用 `/`）
-- verify-report 的"隔离副本存在"断言（报告第 7 节）在沙盒测试中被跳过（需真实隔离目录）
-- 垃圾识别基于静态路径映射（[per-app-path-map.md](references/per-app-path-map.md)），应用更新缓存路径后需人工维护；未做注册表卸载项自动发现
-- 重复压缩包检测仅限盘根（同层同名压缩包+解压目录对），不递归子目录；无哈希级重复文件检测
-- 无定时任务集成（任务计划程序/cron）；清理为手动或 agent 触发
-- 隔离目录无 TTL/自动清理（安全优先的设计，隔离文件需手动处理）
-- 阈值固定（如 7 天新鲜度规则），CLI 未暴露 `-MinSizeMB` / `-MaxAgeDays` 之类过滤参数
-- ✅ ~~大磁盘单线程 PowerShell 枚举可能较慢，扫描无进度持久化/断点续扫~~ —— 现已内置多盘批量（`-Drives D:,E:`）与 `-Resume` 断点续扫/续清
+### 已交付能力
 
-## 下一步迭代方向
+- 跨平台固定盘支持：Windows 使用 `C:`，Linux/macOS 使用 `/`。
+- 平台特定的默认路径和 PowerShell 宿主程序选择。
+- 多盘处理和基于检查点的 `-Resume` 断点续扫/续清。
+- 面向任务计划程序、cron 和 launchd 的策略定时。
+- 审批门控、隔离优先的清理；链接安全遍历；以及原生 Windows/POSIX 锁语义。
+- 覆盖 Windows、Ubuntu 和 macOS 的三平台 CI。
 
-- ✅ ~~PowerShell 7（pwsh）兼容 + 跨平台缓存路径支持（Linux/macOS）~~ —— 已交付（`scripts/lib/platform.ps1`）
-- ✅ ~~GitHub Actions CI（预装 Pester 5.x）让 Pester 分支真正在 CI 中执行~~ —— 已交付（`.github/workflows/test.yml`）
-- ✅ ~~测试夹具参数化（去掉硬编码 `-Drive D:`）~~ —— 已交付（夹具自动探测测试盘）
-- 配置驱动分类法：用户可编辑 JSON（分类、路径、年龄/大小阈值、每用户覆盖）
-- CLI 过滤参数：`-MinSizeMB` / `-MaxAgeDays` / dry-run 报告对比
-- 递归重复检测 + 哈希级文件去重建议
-- 应用路径自动发现（读卸载注册表键 → 推导各应用缓存路径）
-- 任务计划程序集成：定时扫描 + 策略档（安全/激进）+ 释放空间通知
-- 隔离区管理子命令：list / restore / purge，或 TTL 策略
-- summary.md 的 HTML 报告渲染，便于人工审计
-- WSL 感知增强（已有 SKIP_WSL_REGISTERED 处置，扩展到 WSL 发行版临时目录挂载）
-- ✅ ~~多盘批量模式（`-Drives D:,E:`）与长扫描进度/断点续扫~~ —— 已交付（`-Drives C:,D:` + `-Resume`）
+### 当前限制
+
+- 垃圾识别使用静态缓存分类法，应用路径变化时需要维护。
+- 重复压缩包检测仅限盘根且依赖名称；不递归，也不使用哈希。
+- 没有隔离区管理子命令或 TTL 策略。
+- 阈值固定；CLI 未提供 `-MinSizeMB` 或 `-MaxAgeDays`。
+- sandbox harness 未覆盖报告第 7 节的真实隔离区集成断言。
+- WSL 专项感知有限。
+- GitHub Actions 仍会产生非阻塞的 `actions/checkout@v4` Node 运行时弃用警告。
+
+### 优先级迭代方向
+
+1. **可靠性和维护：** 增加真实隔离区集成覆盖，更新 `actions/checkout`，并扩展平台定时任务集成覆盖。
+2. **用户控制和恢复：** 增加配置驱动分类法、CLI 阈值和 dry-run 报告差异，以及隔离区 list/restore/purge/TTL 管理。
+3. **检测和报告：** 增加递归/哈希重复建议、应用路径发现、HTML 审计报告和 WSL 增强。
 
 ## License
 

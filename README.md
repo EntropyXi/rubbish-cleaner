@@ -2,11 +2,11 @@
 
 ![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
 
-[English](README.md) | [简体中文](README_zh.md)
+[English](README.md) | [Simplified Chinese](README_zh.md)
 
-An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode. Release history: [CHANGELOG](CHANGELOG.md) (简体中文: [CHANGELOG_zh](CHANGELOG_zh.md)).
+An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode. Release history: [CHANGELOG](CHANGELOG.md) ([Simplified Chinese](CHANGELOG_zh.md)).
 
-## 文档
+## Documentation
 
 Every document in this repository ships in English and Simplified Chinese, maintained in pairs:
 
@@ -78,7 +78,9 @@ rubbish-cleaner/
 │   ├── scan-drive.ps1                  # Read-only scan + classification (phase 1)
 │   ├── clean-drive.ps1                 # Approval-gated cleanup + quarantine (phase 3)
 │   ├── verify-report.ps1               # Verify + summary report (phase 4)
+│   ├── schedule.ps1                    # Policy-based platform scheduler integration
 │   └── lib/
+│       ├── platform.ps1                # Platform paths, fixed-drive, and host helpers
 │       └── rubbish-core.ps1            # Safety function library (classify/quarantine/report)
 ├── references/
 │   ├── junk-taxonomy.md                # Junk file taxonomy
@@ -90,14 +92,15 @@ rubbish-cleaner/
     │   ├── scan.Tests.ps1              # Pester 5 unit tests (scan classification)
     │   ├── clean.Tests.ps1             # Pester 5 unit tests (safe delete + quarantine)
     │   ├── core.Tests.ps1              # Pester 5 unit tests (core library)
-    │   └── report.Tests.ps1            # Pester 5 unit tests (report)
+    │   ├── report.Tests.ps1            # Pester 5 unit tests (report)
+    │   └── optimization.Tests.ps1      # Pester 5 unit tests (batch and resume behavior)
     └── sandbox/
-        └── run-sandbox-tests.ps1       # Zero-dependency fallback harness (no Pester)
+        └── run-sandbox-tests.ps1       # Zero-dependency fallback harness (nine suites)
 ```
 
 ## Testing
 
-The test suite is **dual-mode** and conditionally picks its runner:
+The local test entry point is **dual-mode** and conditionally picks its runner:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\run-tests.ps1
@@ -105,40 +108,37 @@ powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\ru
 
 - **Mode 0 (always, first):** parse-checks every `.ps1` under `scripts/` and `tests/` via `[System.Management.Automation.Language.Parser]::ParseFile`; exits 1 before any branch if a parse error is found.
 - **Mode 1 (branch):**
-  - **Pester 5.x installed** → prints `BRANCH: PESTER` and runs the four `tests/unit/*.Tests.ps1` suites via `Invoke-Pester -PassThru`; exits 0 only if all pass.
-  - **Pester 5.x not installed** → prints `BRANCH: SANDBOX` and delegates to the zero-dependency harness `tests/sandbox/run-sandbox-tests.ps1` (plain PowerShell asserts, same four suites, builds/cleans its own temp tree under `$env:TEMP\rubbish-cleaner-tests\<pid>`), propagating its exit code.
+  - **Pester 5.x installed** → prints `BRANCH: PESTER` and runs five `tests/unit/*.Tests.ps1` files containing 55 tests via `Invoke-Pester -PassThru`; exits 0 only if all pass.
+  - **Pester 5.x not installed** → prints `BRANCH: SANDBOX` and delegates to the zero-dependency `tests/sandbox/run-sandbox-tests.ps1` harness, which runs nine plain-PowerShell suites and builds/cleans its own temp tree under `$env:TEMP\rubbish-cleaner-tests\<pid>`; its exit code is propagated.
 
-Either way the same four behavior suites (scan classification, safe delete + quarantine, empty-dir detection, report fixture) are covered. Exit code 0 means all assertions passed.
+GitHub Actions runs parser checks, Pester, and the sandbox harness on Windows, Ubuntu, and macOS. Windows also runs the full entry point under Windows PowerShell 5.1. Exit code 0 means all selected assertions passed.
 
-## Limitations & Roadmap
+## Current status
 
-### Current limitations
+### Shipped capabilities
 
-- ✅ ~~Windows-only: built on PowerShell 5.1; no pwsh 7 (PowerShell Core) or Linux/macOS support yet~~ — now runs on Windows (PS 5.1 + pwsh 7) and Linux/macOS (pwsh 7); see [SKILL.md](SKILL.md) `平台支持`
-- ✅ ~~Pester branch of the dual-mode tests: without Pester 5.x on the machine, only the syntax parse-check runs (the sandbox harness is the main execution path)~~ — GitHub Actions CI now runs the Pester branch with Pester 5.x preinstalled
-- ✅ ~~`-Drive D:` is hardcoded in the sandbox test fixtures (ReportFixture and the clean-gating suites); machines without a fixed D: drive need it parameterized~~ — fixtures now auto-detect a test drive (first fixed drive on Windows, `/` elsewhere)
-- The verify-report "quarantine copy exists" assertion (report section 7) is skipped in sandbox tests (needs a real quarantine directory)
-- Junk detection relies on a static path map ([per-app-path-map.md](references/per-app-path-map.md)); cache paths need manual maintenance when apps update, and no registry uninstall-entry auto-discovery exists
-- Duplicate-archive detection only looks at the drive root (same-level same-name archive + extracted-dir pairs), does not recurse into subdirectories; no hash-level duplicate detection
-- No scheduled-task integration (Task Scheduler / cron); cleanup is manual or agent-triggered
-- No TTL/auto-purge for the quarantine directory (safety-first design; quarantined files are handled manually)
-- Fixed thresholds (e.g. the 7-day freshness rule); the CLI exposes no filter params like `-MinSizeMB` / `-MaxAgeDays`
-- ✅ ~~Single-threaded PowerShell enumeration can be slow on large drives; no scan progress persistence or resume~~ — multi-drive batch (`-Drives D:,E:`) plus `-Resume` checkpoint/resume is now built in
+- Cross-platform fixed-drive support: `C:` on Windows and `/` on Linux/macOS.
+- Platform-specific default paths and PowerShell host selection.
+- Multi-drive processing and checkpoint-based `-Resume` support.
+- Policy scheduling for Task Scheduler, cron, and launchd.
+- Approval-gated, quarantine-first cleanup; link-safe traversal; and native Windows/POSIX lock semantics.
+- Three-platform CI across Windows, Ubuntu, and macOS.
 
-### Roadmap / next iterations
+### Active limitations
 
-- ✅ ~~PowerShell 7 (pwsh) compatibility + cross-platform cache path support (Linux/macOS)~~ — delivered via `scripts/lib/platform.ps1`
-- ✅ ~~GitHub Actions CI (with Pester 5.x preinstalled) so the Pester branch actually runs in CI~~ — delivered via `.github/workflows/test.yml`
-- ✅ ~~Parameterize test fixtures (remove the hardcoded `-Drive D:`)~~ — delivered (fixtures auto-detect a test drive)
-- Config-driven taxonomy: user-editable JSON (categories, paths, age/size thresholds, per-user overrides)
-- CLI filter params: `-MinSizeMB` / `-MaxAgeDays` / dry-run report diff
-- Recursive duplicate detection + hash-level dedup suggestions
-- App path auto-discovery (read uninstall registry keys → derive per-app cache paths)
-- Task Scheduler integration: scheduled scans + policy profiles (safe/aggressive) + space-freed notifications
-- Quarantine management subcommands: list / restore / purge, or a TTL policy
-- HTML report rendering of summary.md for manual auditing
-- WSL awareness enhancements (extend the existing SKIP_WSL_REGISTERED handling to WSL distro temp-dir mounts)
-- ✅ ~~Multi-drive batch mode (`-Drives D:,E:`) with long-scan progress / resume~~ — delivered (`-Drives C:,D:` + `-Resume`)
+- Junk detection uses a static cache taxonomy, so application path changes need maintenance.
+- Duplicate-archive detection is root-only and name-based; it does not recurse or use hashes.
+- There are no quarantine management subcommands or TTL policy.
+- Thresholds are fixed; the CLI does not provide `-MinSizeMB` or `-MaxAgeDays`.
+- The report section 7 real-quarantine integration assertion is not exercised by the sandbox harness.
+- WSL-specific awareness is limited.
+- GitHub Actions still emits a non-blocking `actions/checkout@v4` Node runtime deprecation warning.
+
+### Prioritized next iterations
+
+1. **Reliability and maintenance:** add real-quarantine integration coverage, update `actions/checkout`, and expand platform scheduling integration coverage.
+2. **User control and recovery:** add a configuration-driven taxonomy, CLI thresholds and dry-run report diffs, and quarantine list/restore/purge/TTL management.
+3. **Detection and reporting:** add recursive/hash duplicate suggestions, application path discovery, an HTML audit report, and WSL enhancements.
 
 ## License
 
