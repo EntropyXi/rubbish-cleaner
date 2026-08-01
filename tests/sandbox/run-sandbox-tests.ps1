@@ -186,8 +186,35 @@ $suite1 = {
         $script:JunctionLinks.Add($link)
         Assert-Equal 'Test-DirEmpty: dir with only a junction child -> true' $true (Test-DirEmpty -Path $onlyReparse)
         Assert-Equal 'Test-IsJunction: junction -> true' $true (Test-IsJunction -Path $link)
+        Assert-Equal 'Test-DirEmpty: linked path itself -> false' $false (Test-DirEmpty -Path $link)
+
+        # The recursive scan helpers must reject both a linked root and a
+        # linked child instead of walking into the target.
+        New-Item -ItemType Directory -Force -Path (Join-Path $target 'cache') | Out-Null
+        Set-Content -LiteralPath (Join-Path $target 'sentinel.bin') -Value 'outside walk root'
+        Assert-Equal 'Get-DirStatsNoJunction: linked root file count = 0' ([int64]0) (Get-DirStatsNoJunction -LiteralPath $link).FileCount
+        Assert-Equal 'Find-DirsNamed: linked root returns no cache' 0 @(Find-DirsNamed -LiteralRoot $link -Name 'cache').Count
+        Assert-Equal 'Get-DirStatsNoJunction: linked child file count = 0' ([int64]0) (Get-DirStatsNoJunction -LiteralPath $onlyReparse).FileCount
+        Assert-Equal 'Find-DirsNamed: linked child returns no cache' 0 @(Find-DirsNamed -LiteralRoot $onlyReparse -Name 'cache').Count
     } else {
         Write-Output 'SUITE Test-DirEmpty: SKIP (cannot create reparse points)'
+    }
+
+    # Hard links are files, not traversal-capable links, and must make their
+    # containing directory non-empty.
+    $hardTargetDir = Join-Path $base 'hardlink-target'
+    New-Item -ItemType Directory -Force -Path $hardTargetDir | Out-Null
+    $hardTarget = Join-Path $hardTargetDir 'source.txt'
+    Set-Content -LiteralPath $hardTarget -Value 'hardlink payload'
+    $hardContainer = Join-Path $base 'hardlink-child'
+    New-Item -ItemType Directory -Force -Path $hardContainer | Out-Null
+    $hardLink = Join-Path $hardContainer 'linked.txt'
+    try {
+        New-Item -ItemType HardLink -Path $hardLink -Target $hardTarget -ErrorAction Stop | Out-Null
+        Assert-Equal 'Test-IsJunction: hard link -> false' $false (Test-IsJunction -Path $hardLink)
+        Assert-Equal 'Test-DirEmpty: hard-linked file counts as content' $false (Test-DirEmpty -Path $hardContainer)
+    } catch {
+        Write-Output 'SUITE Test-DirEmpty: SKIP hard-link assertions (unsupported filesystem)'
     }
 
     # ---- Get-JunkDispositions (exactly 12, in order) --------------------
@@ -307,15 +334,36 @@ $suite2 = {
 
     # The POSIX dispatcher owns root-temps on non-Windows and must not run in
     # addition to the Windows/common implementation.
+    $posixTemp = Join-Path $base 'isolated-posix-temp'
+    $posixNested = Join-Path $posixTemp 'nested'
+    New-Item -ItemType Directory -Force -Path $posixNested | Out-Null
+    $posixTopOld = Join-Path $posixTemp 'top-level-old.tmp'
+    $posixNestedOld = Join-Path $posixNested 'nested-old.tmp'
+    Set-Content -LiteralPath $posixTopOld -Value 'old top-level temp'
+    Set-Content -LiteralPath $posixNestedOld -Value 'old nested temp'
+    [System.IO.File]::SetLastWriteTime($posixTopOld, (Get-Date).AddDays(-10))
+    [System.IO.File]::SetLastWriteTime($posixNestedOld, (Get-Date).AddDays(-10))
     $detectedIsWin = $script:IsWin
+    $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+    $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+    $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
     try {
         $script:IsWin = $false
+        [System.Environment]::SetEnvironmentVariable('TEMP', $posixTemp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMP', $posixTemp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMPDIR', $posixTemp, 'Process')
         $posixResult = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps')
     } finally {
         $script:IsWin = $detectedIsWin
+        [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
     }
     $posixNames = @($posixResult.Evaluated.ToArray() | ForEach-Object { $_.name })
     Assert-Equal 'POSIX root-temps evaluated once' 1 @($posixNames | Where-Object { $_ -eq 'root-temps' }).Count
+    $posixRows = @($posixResult.Rows.ToArray() | Where-Object { $_.Category -eq 'root-temps' })
+    Assert-Equal 'POSIX root-temps returns one top-level old file' 1 $posixRows.Count
+    Assert-Equal 'POSIX root-temps returns the isolated top-level file' $posixTopOld $posixRows[0].Path
 }
 
 # =====================================================================
@@ -628,6 +676,24 @@ $suite7 = {
     Assert-Equal 'PlatformDetection: system temp dir matches the OS temp root' ([System.IO.Path]::GetTempPath().TrimEnd('\', '/')) (Get-SystemTempDir)
     Assert-True 'PlatformDetection: system temp dir exists' (Test-Path -LiteralPath (Get-SystemTempDir) -PathType Container)
     Assert-True 'PlatformDetection: user documents dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)))
+
+    $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+    $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+    $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
+    $rootTemp = if ($script:IsWin) { $script:TestDrive + '\' } else { '/' }
+    try {
+        if ($script:IsWin) {
+            [System.Environment]::SetEnvironmentVariable('TEMP', $rootTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $rootTemp, 'Process')
+        } else {
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $rootTemp, 'Process')
+        }
+        Assert-Equal 'PlatformDetection: runtime root temp is preserved' $rootTemp (Get-SystemTempDir)
+    } finally {
+        [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+        [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
+    }
 }
 
 # =====================================================================
@@ -787,7 +853,7 @@ try {
     # 1) remove reparse links FIRST so -Recurse never follows a junction
     foreach ($link in $script:JunctionLinks) {
         if (Test-Path -LiteralPath $link) {
-            Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            try { [System.IO.Directory]::Delete([string]$link) } catch { }
         }
     }
     # 2) the pid-keyed root

@@ -161,15 +161,66 @@ Describe 'scan classification' {
     }
 
     It 'evaluates root-temps exactly once through the POSIX implementation' {
+        $tempRoot = Join-Path $script:SuiteRoot 'isolated-posix-temp'
+        $nestedTemp = Join-Path $tempRoot 'nested'
+        New-Item -ItemType Directory -Path $nestedTemp -Force | Out-Null
+        $topLevelOld = Join-Path $tempRoot 'top-level-old.tmp'
+        $nestedOld = Join-Path $nestedTemp 'nested-old.tmp'
+        Set-Content -LiteralPath $topLevelOld -Value 'old top-level temp'
+        Set-Content -LiteralPath $nestedOld -Value 'old nested temp'
+        [System.IO.File]::SetLastWriteTime($topLevelOld, (Get-Date).AddDays(-10))
+        [System.IO.File]::SetLastWriteTime($nestedOld, (Get-Date).AddDays(-10))
+
         $detectedIsWin = $script:IsWin
+        $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+        $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
         try {
             $script:IsWin = $false
+            [System.Environment]::SetEnvironmentVariable('TEMP', $tempRoot, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $tempRoot, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $tempRoot, 'Process')
             $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps')
         } finally {
             $script:IsWin = $detectedIsWin
+            [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
         }
         $names = @($result.Evaluated.ToArray() | ForEach-Object { $_.name })
         @($names | Where-Object { $_ -eq 'root-temps' }).Count | Should -Be 1
+        $rows = @($result.Rows.ToArray() | Where-Object { $_.Category -eq 'root-temps' })
+        $rows.Count | Should -Be 1
+        $rows[0].Path | Should -Be $topLevelOld
+    }
+
+    It 'recursive helpers never follow a linked root or linked child' {
+        $target = Join-Path $script:SuiteRoot 'linked-walk-target'
+        New-Item -ItemType Directory -Path (Join-Path $target 'cache') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $target 'sentinel.bin') -Value 'outside walk root'
+        $walkRoot = Join-Path $script:SuiteRoot 'linked-walk-root'
+        New-Item -ItemType Directory -Path $walkRoot -Force | Out-Null
+        $rootLink = Join-Path $script:SuiteRoot 'linked-walk-as-root'
+        $childLink = Join-Path $walkRoot 'linked-child'
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        try {
+            New-Item -ItemType $linkType -Path $rootLink -Target $target -ErrorAction Stop | Out-Null
+            New-Item -ItemType $linkType -Path $childLink -Target $target -ErrorAction Stop | Out-Null
+        } catch {
+            if (Test-Path -LiteralPath $childLink) { [System.IO.Directory]::Delete($childLink) }
+            if (Test-Path -LiteralPath $rootLink) { [System.IO.Directory]::Delete($rootLink) }
+            Set-ItResult -Inconclusive -Because "cannot create traversal link: $($_.Exception.Message)"
+            return
+        }
+        try {
+            (Get-DirStatsNoJunction -LiteralPath $rootLink).FileCount | Should -Be 0
+            @(Find-DirsNamed -LiteralRoot $rootLink -Name 'cache').Count | Should -Be 0
+            (Get-DirStatsNoJunction -LiteralPath $walkRoot).FileCount | Should -Be 0
+            @(Find-DirsNamed -LiteralRoot $walkRoot -Name 'cache').Count | Should -Be 0
+        } finally {
+            if (Test-Path -LiteralPath $childLink) { [System.IO.Directory]::Delete($childLink) }
+            if (Test-Path -LiteralPath $rootLink) { [System.IO.Directory]::Delete($rootLink) }
+        }
     }
 
     It 'every candidate row carries the full CSV schema (Category|Risk|Path|SizeBytes|FileCount|Action) and a fixed risk->action mapping' {

@@ -41,8 +41,8 @@ jobs:
         shell: pwsh
         run: |
           $result = Invoke-Pester -Path tests/unit -PassThru -Output Detailed
-          Write-Host "PESTER CHECK: $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped"
-          if ($result.FailedCount -gt 0) { throw "$($result.FailedCount) Pester test(s) failed" }
+          Write-Host "PESTER CHECK: result=$($result.Result), $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped, $($result.FailedBlocksCount) failed blocks, $($result.FailedContainersCount) failed containers"
+          if ($result.Result -ne 'Passed') { throw "Pester run failed: $($result.Result)" }
       - name: Run zero-dependency sandbox harness
         shell: pwsh
         run: ./tests/sandbox/run-sandbox-tests.ps1

@@ -36,7 +36,9 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
   中断整次运行**（`$ErrorActionPreference = 'Continue'`）。
 - IOException → `SKIP_LOCKED`；UnauthorizedAccessException → `SKIP_ACCESS_DENIED`；
   ItemNotFound → `SKIP_NOT_FOUND`（按异常链顺序判定，ItemNotFound 优先）。
-- **绝不强杀进程、绝不绝不重试循环**。锁定项记入 cleanup CSV，留给下次运行。
+- Windows 报告为锁定的文件会记入 cleanup CSV 并留给下次运行；POSIX 允许 unlink
+  打开中的文件，此时按成功删除记录 `OK`。
+- **绝不强杀进程、绝不重试循环**。
 
 ## 5. 7 天规则
 
@@ -73,7 +75,7 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
 | 枚举 | 含义 |
 |------|------|
 | `OK` | 删除成功 |
-| `SKIP_LOCKED` | 文件被占用（IOException），跳过 |
+| `SKIP_LOCKED` | Windows 等平台报告文件被占用（IOException），跳过 |
 | `SKIP_ACCESS_DENIED` | 无权限（UnauthorizedAccessException），跳过 |
 | `SKIP_NOT_FOUND` | 项目不存在（已被删/移动），跳过 |
 | `SKIP_NOT_EMPTY` | 目录重验非空，跳过（绝不强删） |
@@ -121,7 +123,7 @@ verify-report.ps1 的 `## 5. Skipped Items Table` 按此枚举计数；任何 SK
 
 - **NO cleanmgr**——不使用磁盘清理向导；本 skill 是脚本式精确清理。
 - **NO `/ResetBase`**——DISM 只用 `/StartComponentCleanup`，绝不重置组件库基线。
-- **NO force-kill**——绝不 `Stop-Process -Force` 来解锁文件；锁定即跳过并记录。
+- **NO force-kill**——绝不 `Stop-Process -Force` 来解锁文件；Windows 锁定项跳过并记录，POSIX 遵循原生 unlink 语义。
 - **NO `powercfg /h off`**、**NO 裸 `-Recurse`**、**NO `Clear-RecycleBin`**
   （回收站只报告，除非用户单独手动批准）。
 

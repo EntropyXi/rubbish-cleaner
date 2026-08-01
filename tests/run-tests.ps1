@@ -60,7 +60,7 @@ if ($pester) {
     Import-Module Pester -MinimumVersion 5.0 -Force
     $r = Invoke-Pester -Path "$PSScriptRoot\unit" -PassThru -Output Detailed
     Write-Output 'BRANCH: PESTER'
-    if ($r.FailedCount -gt 0) { exit 1 } else { exit 0 }
+    if ($r.Result -ne 'Passed') { exit 1 } else { exit 0 }
 } else {
     Write-Output 'BRANCH: SANDBOX'
     $sandbox = Join-Path $PSScriptRoot 'sandbox\run-sandbox-tests.ps1'

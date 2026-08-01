@@ -162,7 +162,13 @@ function Get-UserCacheDir {
 # This avoids false mismatches between Windows 8.3 aliases in $env:TEMP and
 # the long path returned by Path.GetTempPath(), and respects POSIX TMPDIR.
 function Get-SystemTempDir {
-    return [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $tempPath = [System.IO.Path]::GetTempPath()
+    $rootPath = [System.IO.Path]::GetPathRoot($tempPath)
+    if (-not [string]::IsNullOrEmpty($rootPath) -and
+        [string]::Equals($tempPath, $rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $rootPath
+    }
+    return $tempPath.TrimEnd('\', '/')
 }
 
 # Returns the user documents directory:

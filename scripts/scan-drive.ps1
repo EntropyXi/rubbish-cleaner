@@ -174,8 +174,9 @@ function Get-DirStatsNoJunction {
 
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
+        if (Test-IsJunction -Path $dir) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue) {
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if (Test-IsJunction -Path $item.FullName) { continue }
             if ($item.PSIsContainer) {
                 $stack.Push($item.FullName)
             } else {
@@ -205,8 +206,9 @@ function Find-DirsNamed {
 
     while ($stack.Count -gt 0) {
         $dir = $stack.Pop()
+        if (Test-IsJunction -Path $dir) { continue }
         foreach ($item in Get-ChildItem -LiteralPath $dir -Force -Directory -ErrorAction SilentlyContinue) {
-            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+            if (Test-IsJunction -Path $item.FullName) { continue }
             if ($item.Name -eq $Name) {
                 $found.Add($item.FullName)
             } else {
