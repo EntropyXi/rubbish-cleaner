@@ -11,18 +11,15 @@
 #
 # Pester 5 syntax ONLY (BeforeAll / It / Should -Be / -BeTrue / -BeGreaterThan /
 # Set-ItResult); no Pester-3-only patterns. Temp fixtures live under
-# $env:TEMP\rubbish-cleaner-tests\<pid>\optimization and are removed in AfterAll.
+# <temp>\rubbish-cleaner-tests\<pid>\optimization (temp root resolved via
+# [System.IO.Path]::GetTempPath(), the cross-platform temp root)
+# and are removed in AfterAll.
 #
 # scan-drive.ps1 validates a real fixed volume (Get-Volume), so its
 # classification logic is consumed through the same <begin-classification> /
 # <end-classification> seam used by scan.Tests.ps1; the multi-drive and resume
 # subprocess checks run against real fixed drives read-only with a tiny
 # category filter.
-
-$script:SuiteRoot      = Join-Path $env:TEMP ("rubbish-cleaner-tests\{0}\optimization" -f $PID)
-$script:ScanDrivePath  = Join-Path $PSScriptRoot '..\..\scripts\scan-drive.ps1'
-$script:SchedulePath   = Join-Path $PSScriptRoot '..\..\scripts\schedule.ps1'
-$script:PolicyDir      = Join-Path $PSScriptRoot '..\..\references\policies'
 
 function New-TestDir {
     param([string]$Name)
@@ -32,6 +29,13 @@ function New-TestDir {
 }
 
 BeforeAll {
+    # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
+    # set during discovery are NULL in the run phase, so paths built here).
+    $script:SuiteRoot      = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\optimization" -f $PID)
+    $script:ScanDrivePath  = Join-Path $PSScriptRoot '..\..\scripts\scan-drive.ps1'
+    $script:SchedulePath   = Join-Path $PSScriptRoot '..\..\scripts\schedule.ps1'
+    $script:PolicyDir      = Join-Path $PSScriptRoot '..\..\references\policies'
+
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\platform.ps1')
 
@@ -168,7 +172,7 @@ Describe 'CheckpointResume' {
 
 Describe 'PlatformDetection' {
     It 'detects Windows on this machine' {
-        $script:IsWindows | Should -BeTrue
+        $script:IsWin | Should -BeTrue
     }
 
     It 'reports at least one fixed drive letter' {

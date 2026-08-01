@@ -22,14 +22,15 @@
 #   6. CheckpointResume      - scan checkpoint produced; partial resume skips a
 #                             completed category + resumes current lastPath;
 #                             -Resume subprocess skip message
-#   7. PlatformDetection     - platform.ps1: IsWindows / Get-FixedDriveLetters /
+#   7. PlatformDetection     - platform.ps1: IsWin / Get-FixedDriveLetters /
 #                             Get-UserCacheDir
 #   8. ScheduleParams        - schedule.ps1 List/Register exit codes + policy
 #                             JSONs parse
 #   9. MultiDrive            - scan-drive.ps1 -Drives -> two per-drive run dirs;
 #                             -Parallel same result
 #
-# Safety: ALL temp state lives under $env:TEMP\rubbish-cleaner-tests\<pid>\.
+# Safety: ALL temp state lives under <temp>\rubbish-cleaner-tests\<pid>\
+# (temp root resolved via [System.IO.Path]::GetTempPath()).
 # Cleanup runs in finally: reparse links first (so -Recurse never follows a
 # junction), then the <pid> root, then the parent if left empty. Nothing
 # outside that root is touched.
@@ -41,13 +42,13 @@ $ErrorActionPreference = 'Stop'
 # Picks the first fixed drive with used space on Windows, '/' elsewhere.
 # ---------------------------------------------------------------------
 . (Join-Path $PSScriptRoot '../../scripts/lib/platform.ps1')
-if ($script:IsWindows) {
+if ($script:IsWin) {
     $script:TestDrive = ((Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -gt 0 -and $_.Root -match '^[A-Z]:\\$' } | Select-Object -First 1).Root).TrimEnd('\')
 } else {
     $script:TestDrive = '/'
 }
 if (-not $script:TestDrive) { $script:TestDrive = 'C:' }
-if ($script:IsWindows) {
+if ($script:IsWin) {
     $probePath = $script:TestDrive.TrimEnd(':') + ':\'
 } else {
     $probePath = '/'
@@ -69,7 +70,7 @@ $script:VerifyReportPath  = Join-Path $script:RepoRoot 'scripts\verify-report.ps
 # ---------------------------------------------------------------------
 # pid-keyed temp root (removed in finally, together with the parent).
 # ---------------------------------------------------------------------
-$script:TestParent = Join-Path $env:TEMP 'rubbish-cleaner-tests'
+$script:TestParent = Join-Path ([System.IO.Path]::GetTempPath()) 'rubbish-cleaner-tests'
 $script:TestRoot   = Join-Path $script:TestParent $PID
 New-Item -ItemType Directory -Force -Path $script:TestRoot | Out-Null
 
@@ -602,10 +603,10 @@ $suite6 = {
 # =====================================================================
 $suite7 = {
     . (Join-Path $script:RepoRoot 'scripts\lib\platform.ps1')
-    Assert-Equal 'PlatformDetection: IsWindows true on this machine' $true ([bool]$script:IsWindows)
+    Assert-Equal 'PlatformDetection: IsWindows true on this machine' $true ([bool]$script:IsWin)
     Assert-True 'PlatformDetection: at least 1 fixed drive letter' (@(Get-FixedDriveLetters).Count -ge 1)
     Assert-True 'PlatformDetection: user cache dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserCacheDir)))
-    Assert-Equal 'PlatformDetection: system temp dir matches $env:TEMP on Windows' $env:TEMP (Get-SystemTempDir)
+    Assert-Equal 'PlatformDetection: system temp dir matches the OS temp root' ([System.IO.Path]::GetTempPath().TrimEnd('\', '/')) (Get-SystemTempDir)
     Assert-True 'PlatformDetection: user documents dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)))
 }
 

@@ -8,7 +8,7 @@
 #                          per-category freed estimate is deterministic
 #
 # verify-report.ps1 is invoked with & (its trailing `exit 0` returns to the
-# caller) against the REAL drive letter that hosts $env:TEMP - it is fully
+# caller) against the REAL drive letter that hosts the temp root - it is fully
 # read-only except for writing <RunDir>\summary.md and re-reading live free
 # space, so no drive mutation happens. The fixture is crafted so every live
 # assertion in section 7 is deterministic:
@@ -28,14 +28,18 @@
 # Pester 5 syntax ONLY (BeforeAll / It / Should -Be / -BeTrue); no Pester-3-only
 # patterns (Describe tagging / Context-only usage).
 
-$script:SuiteRoot = Join-Path $env:TEMP ("rubbish-cleaner-tests\{0}\report" -f $PID)
-$script:VerifyScript = Join-Path $PSScriptRoot '..\..\scripts\verify-report.ps1'
-$script:DriveLetter = [System.IO.Path]::GetPathRoot($env:TEMP).TrimEnd('\').TrimEnd(':').ToUpperInvariant()
-$script:QuarantineLeaf = 'q-{0}.dat' -f $PID
-# Same derivation verify-report.ps1 uses: "$env:USERPROFILE\Desktop\.omo\quarantine\<letter>".
-$script:QuarantineDir = Join-Path (Join-Path $env:USERPROFILE 'Desktop\.omo\quarantine') $script:DriveLetter
-
 BeforeAll {
+    # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
+    # set during discovery are NULL in the run phase, so paths built here).
+    # Temp root comes from [System.IO.Path]::GetTempPath(), the cross-platform
+    # temp root.
+    $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\report" -f $PID)
+    $script:VerifyScript = Join-Path $PSScriptRoot '..\..\scripts\verify-report.ps1'
+    $script:DriveLetter = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()).TrimEnd('\').TrimEnd(':').ToUpperInvariant()
+    $script:QuarantineLeaf = 'q-{0}.dat' -f $PID
+    # Same derivation verify-report.ps1 uses: "$env:USERPROFILE\Desktop\.omo\quarantine\<letter>".
+    $script:QuarantineDir = Join-Path (Join-Path $env:USERPROFILE 'Desktop\.omo\quarantine') $script:DriveLetter
+
     $script:RunDir = Join-Path $script:SuiteRoot 'run'
     New-Item -ItemType Directory -Path $script:RunDir -Force | Out-Null
     $script:Preflight = Join-Path $script:RunDir 'preflight.txt'

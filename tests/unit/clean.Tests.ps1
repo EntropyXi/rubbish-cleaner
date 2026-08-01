@@ -4,14 +4,12 @@
 # used by clean-drive.ps1 before any directory removal.
 #
 # Every destructive action here runs ONLY against files under the pid-keyed
-# fake tree $env:TEMP\rubbish-cleaner-tests\<pid>\clean; nothing outside it is
-# touched, and the whole tree is removed in AfterAll.
+# fake tree <temp>\rubbish-cleaner-tests\<pid>\clean (temp root resolved via
+# [System.IO.Path]::GetTempPath(), the cross-platform temp root);
+# nothing outside it is touched, and the whole tree is removed in AfterAll.
 #
 # Pester 5 syntax ONLY (BeforeAll / It / Should -Be / -BeTrue); no Pester-3-only
 # patterns (Describe tagging / Context-only usage).
-
-$script:SuiteRoot = Join-Path $env:TEMP ("rubbish-cleaner-tests\{0}\clean" -f $PID)
-$script:CleanupCsv = Join-Path $script:SuiteRoot 'cleanup-errors.csv'
 
 . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
 
@@ -37,6 +35,10 @@ function Get-CleanupRowsFrom {
 }
 
 BeforeAll {
+    # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
+    # set during discovery are NULL in the run phase, so paths built here).
+    $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\clean" -f $PID)
+    $script:CleanupCsv = Join-Path $script:SuiteRoot 'cleanup-errors.csv'
     New-Item -ItemType Directory -Path $script:SuiteRoot -Force | Out-Null
 }
 

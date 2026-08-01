@@ -9,7 +9,8 @@
 # This suite uses exactly that testable seam: it dot-sources the extracted
 # classification block together with scripts/lib/rubbish-core.ps1 and invokes
 # Get-JunkCandidates against a fake tree under
-# $env:TEMP\rubbish-cleaner-tests\<pid>\scan.
+# <temp>\rubbish-cleaner-tests\<pid>\scan (temp root resolved via
+# [System.IO.Path]::GetTempPath(), the cross-platform temp root).
 #
 # Fake tree (mirrors the shared behavior matrix):
 #   Temp\a.tmp          (>7 days old)           -> root-temps        (SAFE/delete)
@@ -24,10 +25,12 @@
 # so the evaluated category set is deterministic: root-temps, root-logs,
 # duplicate-archives, empty-dirs, recycle-bin, root-suspicious, app-caches (7).
 
-$script:SuiteRoot = Join-Path $env:TEMP ("rubbish-cleaner-tests\{0}\scan" -f $PID)
-$script:ScanDrivePath = Join-Path $PSScriptRoot '..\..\scripts\scan-drive.ps1'
-
 BeforeAll {
+    # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
+    # set during discovery are NULL in the run phase, so paths built here).
+    $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\scan" -f $PID)
+    $script:ScanDrivePath = Join-Path $PSScriptRoot '..\..\scripts\scan-drive.ps1'
+
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
 
     # ---- extract + dot-source the classification seam --------------------

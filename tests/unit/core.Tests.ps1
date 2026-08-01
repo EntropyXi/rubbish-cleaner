@@ -7,11 +7,11 @@
 # Should -Be / -BeTrue / Set-ItResult); no Pester-3-only patterns (Describe
 # tagging / Context-only usage).
 #
-# Temp fixtures live under $env:TEMP\rubbish-cleaner-tests\<pid>\core and are
-# removed in AfterAll (own suite dir first, then empty <pid> and parent
-# ancestors on a best-effort basis).
+# Temp fixtures live under <temp>\rubbish-cleaner-tests\<pid>\core (temp root
+# resolved via [System.IO.Path]::GetTempPath(), the cross-platform temp root)
+# and are removed in AfterAll (own suite dir first, then empty <pid> and
+# parent ancestors on a best-effort basis).
 
-$script:SuiteRoot = Join-Path $env:TEMP ("rubbish-cleaner-tests\{0}\core" -f $PID)
 . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
 
 function New-TestDir {
@@ -22,6 +22,10 @@ function New-TestDir {
 }
 
 BeforeAll {
+    # Fixture plumbing lives in BeforeAll (Pester 5: top-level $script: vars
+    # set during discovery are NULL in the run phase, so paths built here).
+    $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\core" -f $PID)
+
     # One reparse point shared by the Test-DirEmpty and Test-IsJunction
     # suites. Junction first (no admin rights needed on Windows); fall back to
     # a symbolic link; if BOTH fail (no reparse-point privileges) print the
