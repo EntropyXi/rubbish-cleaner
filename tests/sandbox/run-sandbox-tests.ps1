@@ -598,7 +598,7 @@ $suite6 = {
     # ---- (C) -Resume subprocess: skip/resume message ---------------------
     $outDir = Join-Path $base 'out'
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-    $runDir = Join-Path $outDir ("C-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $runDir = Join-Path $outDir ("{0}-{1}" -f $script:TestDriveInfo.Id, (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Force -Path $runDir | Out-Null
     $cpJson = [ordered]@{
         drive               = $script:TestDrive
