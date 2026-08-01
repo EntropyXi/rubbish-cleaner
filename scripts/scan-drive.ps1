@@ -271,12 +271,18 @@ function Get-JunkCandidates {
 
     # Emits the category-level Write-Progress line (todo 4 spec: category-level
     # granularity, NOT per-file). $Pg is a mutable {Done;Total} hashtable.
+    # PercentComplete is clamped to 0..100 (pwsh 7 validates the range; the
+    # Done counter also counts categories skipped by resume, so it can exceed
+    # the filtered Total).
     function Update-CategoryProgress {
         param([hashtable]$Pg, [string]$Category)
         $Pg['Done'] = [int]$Pg['Done'] + 1
+        $pct = [Math]::Floor(100 * [int]$Pg['Done'] / [Math]::Max(1, [int]$Pg['Total']))
+        if ($pct -gt 100) { $pct = 100 }
+        if ($pct -lt 0)   { $pct = 0 }
         Write-Progress -Activity "Scanning $Category" `
             -Status "$($Pg['Done'])/$($Pg['Total']) categories" `
-            -PercentComplete ([Math]::Floor(100 * [int]$Pg['Done'] / [Math]::Max(1, [int]$Pg['Total'])))
+            -PercentComplete $pct
     }
 
     # todo 4 resume filter for a per-file loop. ALWAYS re-sorts the input by

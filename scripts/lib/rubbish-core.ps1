@@ -247,19 +247,19 @@ function Invoke-ParallelForEach {
             }
         }
     } elseif ($script:IsPwsh7) {
-        # pwsh 7+: native ForEach-Object -Parallel. Scriptblock passed by text
-        # (runspaces cannot share live ScriptBlock objects across boundaries).
+        # pwsh 7+: native ForEach-Object -Parallel. The user scriptblock travels
+        # as TEXT (runspaces cannot share live ScriptBlock objects across
+        # boundaries); the arg array is captured via $using: (ForEach-Object
+        # -Parallel does NOT accept -ArgumentList in its Parallel parameter set).
         $sbText = $ScriptBlock.ToString()
-        $inner = {
-            param($userSbText, $argList)
-            $userSb = [scriptblock]::Create($userSbText)
-            try {
-                & $userSb $_ @argList
-            } catch {
-                Write-Error "Item '$_' failed: $($_.Exception.Message)"
-            }
-        }
-        $parallelOut = @($InputObject | ForEach-Object -Parallel $inner -ThrottleLimit $ThrottleLimit -ArgumentList @($sbText, $argArray))
+        $parallelOut = @($InputObject | ForEach-Object -Parallel {
+                $userSb = [scriptblock]::Create($using:sbText)
+                try {
+                    & $userSb $_ @($using:argArray)
+                } catch {
+                    Write-Error "Item '$_' failed: $($_.Exception.Message)"
+                }
+            } -ThrottleLimit $ThrottleLimit)
         foreach ($o in $parallelOut) { [void]$results.Add($o) }
     } else {
         # PS 5.1: chunk $InputObject into ThrottleLimit-sized batches; one
