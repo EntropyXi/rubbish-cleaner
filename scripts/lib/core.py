@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import concurrent.futures
+import csv
+import errno
 import os
-import shutil
+import threading
 from datetime import datetime
 from typing import Any, Callable
 
@@ -26,10 +28,12 @@ JUNK_DISPOSITIONS = [
     "MOVE_FAILED",
 ]
 
-_CSV_HEADER = "Timestamp|Phase|Action|Path|ErrorMessage|Disposition"
+_CSV_COLUMNS = ("Timestamp", "Phase", "Action", "Path", "ErrorMessage", "Disposition")
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 _INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
 _ERROR_SHARING_VIOLATION = 32
+_CSV_LOCKS: dict[str, threading.Lock] = {}
+_CSV_LOCKS_GUARD = threading.Lock()
 
 
 def _is_windows_reparse_point(path: str) -> bool:
@@ -44,10 +48,10 @@ def _is_windows_reparse_point(path: str) -> bool:
     get_attributes.argtypes = (wintypes.LPCWSTR,)
     get_attributes.restype = wintypes.DWORD
     attributes = get_attributes(os.fspath(path))
-    return (
-        attributes != _INVALID_FILE_ATTRIBUTES
-        and bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
-    )
+    if attributes == _INVALID_FILE_ATTRIBUTES:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "GetFileAttributesW could not inspect path", path)
+    return bool(attributes & _FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def is_junction(path: str) -> bool:
@@ -56,40 +60,88 @@ def is_junction(path: str) -> bool:
         return False
 
     try:
-        return os.path.isjunction(path)
-    except AttributeError:
-        return _is_windows_reparse_point(path)
-    except OSError:
+        os.lstat(path)
+    except FileNotFoundError:
         return False
+
+    path_is_junction = getattr(os.path, "isjunction", None)
+    if path_is_junction is not None:
+        try:
+            return bool(path_is_junction(path))
+        except OSError:
+            pass
+    return _is_windows_reparse_point(path)
+
+
+def _normalized_path(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
+
+
+def _path_is_traversal_link(path: str) -> bool:
+    """Return link/reparse status, raising when the status cannot be known."""
+    status = os.lstat(path)
+    if os.path.islink(path):
+        return True
+    if not IS_WINDOWS:
+        return False
+
+    attributes = getattr(status, "st_file_attributes", 0)
+    if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return True
+    return is_junction(path)
+
+
+def _assert_no_traversal_components(path: str) -> str:
+    """Normalize *path* and reject every existing link/reparse component."""
+    normalized = _normalized_path(path)
+    components: list[str] = []
+    current = normalized
+    while True:
+        components.append(current)
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    for component in reversed(components):
+        try:
+            if _path_is_traversal_link(component):
+                raise OSError(
+                    errno.ELOOP,
+                    "Refusing a traversal-link path component",
+                    component,
+                )
+        except FileNotFoundError:
+            continue
+    return normalized
 
 
 def _entry_is_traversal_link(entry: os.DirEntry[str]) -> bool:
-    try:
-        if entry.is_symlink():
-            return True
-        if not IS_WINDOWS:
-            return False
-
-        entry_is_junction = getattr(entry, "is_junction", None)
-        if entry_is_junction is not None:
-            return bool(entry_is_junction())
-        return _is_windows_reparse_point(entry.path)
-    except OSError:
+    if entry.is_symlink():
+        return True
+    if not IS_WINDOWS:
         return False
+
+    entry_is_junction = getattr(entry, "is_junction", None)
+    if entry_is_junction is not None:
+        return bool(entry_is_junction())
+    return _path_is_traversal_link(entry.path)
 
 
 def is_dir_empty(path: str) -> bool:
     """Return True when a directory tree has no non-link entries."""
     try:
-        if not os.path.isdir(path) or os.path.islink(path) or is_junction(path):
+        if not os.path.isdir(path) or _path_is_traversal_link(path):
             return False
     except OSError:
         return False
 
-    stack = [os.fspath(path)]
+    stack = [_normalized_path(path)]
     while stack:
         current = stack.pop()
         try:
+            if _path_is_traversal_link(current):
+                return False
             with os.scandir(current) as entries:
                 for entry in entries:
                     if _entry_is_traversal_link(entry):
@@ -109,9 +161,14 @@ def _csv_field(value: Any) -> str:
     return str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
 
 
+def _csv_lock(csv_path: str) -> threading.Lock:
+    key = _normalized_path(csv_path)
+    with _CSV_LOCKS_GUARD:
+        return _CSV_LOCKS.setdefault(key, threading.Lock())
+
+
 def write_cleanup_csv(csv_path: str, row: dict[str, Any]) -> None:
     """Append a cleanup outcome to the pipe-delimited audit CSV."""
-    needs_header = not os.path.exists(csv_path)
     fields = [
         datetime.now().astimezone().isoformat(),
         row.get("Phase", ""),
@@ -120,10 +177,18 @@ def write_cleanup_csv(csv_path: str, row: dict[str, Any]) -> None:
         row.get("ErrorMessage", ""),
         row.get("Disposition", ""),
     ]
-    with open(csv_path, "a", encoding="utf-8", newline="") as stream:
-        if needs_header:
-            stream.write(_CSV_HEADER + "\n")
-        stream.write("|".join(_csv_field(field) for field in fields) + "\n")
+    normalized = _normalized_path(csv_path)
+    with _csv_lock(normalized):
+        _assert_no_traversal_components(normalized)
+        needs_header = not os.path.exists(normalized) or os.path.getsize(normalized) == 0
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(normalized, flags, 0o666)
+        with os.fdopen(descriptor, "a", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream, delimiter="|", lineterminator="\n")
+            if needs_header:
+                writer.writerow(_CSV_COLUMNS)
+            writer.writerow([_csv_field(field) for field in fields])
 
 
 def safe_remove(path: str, phase: str, csv_path: str) -> str:
@@ -164,8 +229,30 @@ def quarantine(path: str, quarantine_dir: str, phase: str, csv_path: str) -> str
     """Move exactly one named item into quarantine and record the outcome."""
     error_message = ""
     try:
-        os.makedirs(quarantine_dir, exist_ok=True)
-        shutil.move(path, quarantine_dir)
+        source = _assert_no_traversal_components(path)
+        destination_dir = _assert_no_traversal_components(quarantine_dir)
+        source_status = os.lstat(source)
+        source_name = os.path.basename(source)
+        if not source_name:
+            raise OSError(errno.EINVAL, "Refusing to quarantine a filesystem root", source)
+
+        os.makedirs(destination_dir, exist_ok=True)
+        _assert_no_traversal_components(destination_dir)
+        if not os.path.isdir(destination_dir):
+            raise OSError(
+                errno.ENOTDIR,
+                "Quarantine destination is not a directory",
+                destination_dir,
+            )
+
+        destination = os.path.join(destination_dir, source_name)
+        _assert_no_traversal_components(destination)
+        if os.path.lexists(destination):
+            raise OSError(errno.EEXIST, "Quarantine destination already exists", destination)
+        if os.path.isdir(source) and source_status.st_dev != os.stat(destination_dir).st_dev:
+            raise OSError(errno.EXDEV, "Refusing cross-device directory quarantine", source)
+
+        os.rename(source, destination)
         disposition = "QUARANTINED"
     except OSError as error:
         disposition = "MOVE_FAILED"
@@ -202,6 +289,9 @@ def test_file_locked(path: str) -> bool:
             wintypes.HANDLE,
         )
         create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
         handle = create_file(
             os.fspath(path),
             0x80000000,  # GENERIC_READ
@@ -213,8 +303,10 @@ def test_file_locked(path: str) -> bool:
         )
         if handle == ctypes.c_void_p(-1).value:
             return True
-        kernel32.CloseHandle(handle)
-        return False
+        try:
+            return False
+        finally:
+            close_handle(handle)
 
     import fcntl
 
