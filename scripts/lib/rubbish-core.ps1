@@ -9,6 +9,11 @@
 # junctions when recursing; recursion is done manually and reparse-point
 # children are skipped without descending.
 
+# Dot-source platform.ps1 (side-effect free) for the module-scoped
+# $script:IsCoreCLR flag used by Invoke-ParallelForEach to pick the pwsh 7
+# ForEach-Object -Parallel path vs the PS 5.1 Start-Job fallback.
+. (Join-Path $PSScriptRoot 'platform.ps1')
+
 # (a) Junction-aware recursive empty check.
 # Returns $true ONLY when $Path contains no files and no non-junction subdirs,
 # i.e. the whole tree beneath $Path (EXCLUDING reparse-point children) is
@@ -181,4 +186,126 @@ function Test-FileLocked {
         # The open threw (file locked / not accessible) -> treat as locked.
         return $true
     }
+}
+
+# (i) Run $ScriptBlock once per item in $InputObject with bounded concurrency.
+#
+# Contract: inside $ScriptBlock the CURRENT ITEM is always the FIRST
+# positional argument, followed by the values from -ArgumentList. So a
+# scriptblock may declare `param($item, $arg1, ...)` or use `$args` directly
+# ($args[0] = item, $args[1] = first -ArgumentList value, ...). Results from
+# every invocation are collected and returned in input order.
+#
+# Execution paths:
+#   * pwsh 7+ ($script:IsCoreCLR): native `ForEach-Object -Parallel` with
+#     -ThrottleLimit. The user scriptblock is passed BY TEXT and re-created
+#     in each parallel runspace (runspaces cannot share live ScriptBlock
+#     objects), then invoked with the item as its first positional argument.
+#   * Windows PowerShell 5.1: $InputObject is batched into chunks of
+#     $ThrottleLimit; each chunk is a `Start-Job` background process whose
+#     inner scriptblock re-creates the user scriptblock from text and invokes
+#     it per item (`& $sb $i @argsOuter`). All jobs are Wait-Job'd, results
+#     Receive-Job'd in chunk order, and Remove-Job'd (try/finally, so jobs
+#     are cleaned up even if a job failed).
+#   * ThrottleLimit=1 or a single input item: fully sequential invocation.
+#
+# Error handling: per-item failures are caught and recorded; processing
+# continues over every item. After all items, if any item failed a single
+# aggregated Write-Error is emitted (the per-item message text is preserved).
+#
+# SCOPE WARNING: pwsh -Parallel and Start-Job both execute $ScriptBlock in a
+# clean scope with NO access to caller variables. Reference external values
+# ONLY via -ArgumentList (they follow the item in $args / extra params).
+# COMPLEX CALLERS that need full scan context (the loaded path map, exclusion
+# lists, a live session variable, etc.) MUST run a subprocess instead of this
+# in-process wrapper: `powershell.exe -File <script>.ps1 ...` (PS 5.1) or
+# `pwsh -File <script>.ps1 ...` (PowerShell Core). Do NOT pass complex state
+# through -ArgumentList.
+function Invoke-ParallelForEach {
+    param(
+        [object[]]$InputObject,
+        [scriptblock]$ScriptBlock,
+        [int]$ThrottleLimit = 4,
+        [object[]]$ArgumentList = @()
+    )
+
+    # Normalize to an array so splatting (@argArray) always works, including
+    # the empty / single-scalar cases.
+    $argArray = @($ArgumentList)
+
+    $results = New-Object System.Collections.ArrayList
+    $errors  = New-Object System.Collections.ArrayList
+
+    if ($ThrottleLimit -le 1 -or $InputObject.Count -le 1) {
+        # Sequential fallback: never spawns jobs.
+        foreach ($item in $InputObject) {
+            try {
+                $out = & $ScriptBlock $item @argArray
+                if ($null -ne $out) { [void]$results.AddRange(@($out)) }
+            } catch {
+                [void]$errors.Add("Item '$item' failed: $($_.Exception.Message)")
+            }
+        }
+    } elseif ($script:IsCoreCLR) {
+        # pwsh 7+: native ForEach-Object -Parallel. Scriptblock passed by text
+        # (runspaces cannot share live ScriptBlock objects across boundaries).
+        $sbText = $ScriptBlock.ToString()
+        $inner = {
+            param($userSbText, $argList)
+            $userSb = [scriptblock]::Create($userSbText)
+            try {
+                & $userSb $_ @argList
+            } catch {
+                Write-Error "Item '$_' failed: $($_.Exception.Message)"
+            }
+        }
+        $parallelOut = @($InputObject | ForEach-Object -Parallel $inner -ThrottleLimit $ThrottleLimit -ArgumentList @($sbText, $argArray))
+        foreach ($o in $parallelOut) { [void]$results.Add($o) }
+    } else {
+        # PS 5.1: chunk $InputObject into ThrottleLimit-sized batches; one
+        # Start-Job per chunk. The user scriptblock travels as TEXT because
+        # ScriptBlock objects deserialize to strings across process boundaries.
+        $sbText = $ScriptBlock.ToString()
+        $jobSb = {
+            param($items, $sbTextInner, $argsOuter)
+            $sb = [scriptblock]::Create($sbTextInner)
+            foreach ($i in $items) {
+                try {
+                    & $sb $i @argsOuter
+                } catch {
+                    Write-Error "Item '$i' failed: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        $chunks = New-Object System.Collections.ArrayList
+        for ($i = 0; $i -lt $InputObject.Count; $i += $ThrottleLimit) {
+            $end = [Math]::Min($i + $ThrottleLimit - 1, $InputObject.Count - 1)
+            [void]$chunks.Add(@($InputObject[$i..$end]))
+        }
+
+        $jobs = @()
+        try {
+            foreach ($chunk in $chunks) {
+                $jobs += Start-Job -ScriptBlock $jobSb -ArgumentList @($chunk, $sbText, $argArray)
+            }
+            if ($jobs.Count -gt 0) {
+                $null = Wait-Job -Job $jobs
+                foreach ($j in $jobs) {
+                    $jobErr = $null
+                    $jobOut = Receive-Job -Job $j -ErrorVariable jobErr
+                    if ($null -ne $jobOut) { [void]$results.AddRange(@($jobOut)) }
+                    if ($jobErr) { foreach ($e in $jobErr) { [void]$errors.Add($e.Exception.Message) } }
+                }
+            }
+        } finally {
+            if ($jobs.Count -gt 0) { Remove-Job -Job $jobs -Force -ErrorAction SilentlyContinue }
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        Write-Error ("Invoke-ParallelForEach: $($errors.Count) item(s) failed. First error: " + $errors[0])
+    }
+
+    return @($results)
 }
