@@ -14,7 +14,7 @@
 
 ## 文档
 
-本仓库所有文档均为中英双语、成对维护：
+以下列出的核心用户文档以中英文成对维护：
 
 - [README.md](README.md) ↔ [README_zh.md](README_zh.md)（本概览）
 - [SKILL.md](SKILL.md) ↔ [SKILL_zh.md](SKILL_zh.md)（agent 技能核心）
@@ -52,13 +52,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\install.ps1
 - 目标盘符，例如 `D:`
 - 要包含或排除的类别（例如：不删安装包、不删回收站）
 - 绝不触碰的路径或文件夹（不删哪些）
-- 按天数指定的时效阈值（指定天数，默认 7 天规则）
 - 只扫描（dry-run）还是也执行清理
 
 提示词示例：
 
 1. `/rubbish-cleaner 扫描 C 盘，列出可以释放空间的项目，先不要删除任何东西。`
-2. `/rubbish-cleaner 清理 D 盘：删除超过 30 天的临时文件和缓存，但跳过 D:\Downloads 和 D:\Games 里的任何内容。`
+2. `/rubbish-cleaner 清理 D 盘：清理内置规则选出的临时文件和应用缓存，但跳过 D:\Downloads 和 D:\Games 里的任何内容。`
 3. `/rubbish-cleaner 看看 E 盘有什么垃圾？只要列出浏览器缓存和日志就行。`
 
 agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分类候选清单 → 等待你批准 → 安全清理（隔离 = 移动到备份目录，绝不永久删除；Windows 报告为锁定的文件会跳过，Linux/macOS 则遵循 POSIX 语义，打开中的文件仍可能被 unlink）→ 校验并写入汇总报告（`.omo\evidence\rubbish-cleaner\` 运行目录下的 `summary.md`）。
@@ -135,7 +134,7 @@ GitHub Actions 在 Windows、Ubuntu 和 macOS 上运行语法解析检查、Pest
 - 垃圾识别使用静态缓存分类法，应用路径变化时需要维护。
 - 重复压缩包检测仅限盘根且依赖名称；不递归，也不使用哈希。
 - 没有隔离区管理子命令或 TTL 策略。
-- 阈值固定；CLI 未提供 `-MinSizeMB` 或 `-MaxAgeDays`。
+- 时效规则固定为七天；CLI 未提供 `-MinSizeMB` 或 `-MaxAgeDays`。
 - sandbox harness 未覆盖报告第 7 节的真实隔离区集成断言。
 - WSL 专项感知有限。
 - GitHub Actions 仍会产生非阻塞的 `actions/checkout@v4` Node 运行时弃用警告。

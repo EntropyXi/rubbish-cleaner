@@ -8,7 +8,7 @@ An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode. 
 
 ## Documentation
 
-Every document in this repository ships in English and Simplified Chinese, maintained in pairs:
+The core user-facing documents listed below are maintained in English and Simplified Chinese pairs:
 
 - [README.md](README.md) ↔ [README_zh.md](README_zh.md) (overview)
 - [SKILL.md](SKILL.md) ↔ [SKILL_zh.md](SKILL_zh.md) (agent-facing skill core)
@@ -46,13 +46,12 @@ What you can specify in your prompt (the skill maps these to its scan/clean para
 - Target drive: `D:` on Windows, or `/` on Linux/macOS
 - Categories to include or exclude (for example: keep installers, keep the recycle bin)
 - Paths or folders to never touch
-- Recency threshold in days (default: 7-day rule)
 - Whether to only scan (dry-run) or also clean
 
 Prompt examples:
 
 1. `/rubbish-cleaner Scan drive C: and show me what can be freed. Do not delete anything yet.`
-2. `/rubbish-cleaner Clean drive D: - remove temp files and app caches older than 30 days, but skip anything in D:\Downloads and D:\Games.`
+2. `/rubbish-cleaner Clean drive D: - remove temporary files and app caches selected by the built-in rules, but skip anything in D:\Downloads and D:\Games.`
 3. `/rubbish-cleaner What junk is on E:? Only list browser caches and logs.`
 
 The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; files that Windows reports as locked are skipped, while POSIX may unlink an open file according to native filesystem semantics) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`). Windows stores this under the Desktop as before; Linux/macOS use `$HOME/.omo/`.
@@ -129,7 +128,7 @@ GitHub Actions runs parser checks, Pester, and the sandbox harness on Windows, U
 - Junk detection uses a static cache taxonomy, so application path changes need maintenance.
 - Duplicate-archive detection is root-only and name-based; it does not recurse or use hashes.
 - There are no quarantine management subcommands or TTL policy.
-- Thresholds are fixed; the CLI does not provide `-MinSizeMB` or `-MaxAgeDays`.
+- The freshness rule is fixed at seven days; the CLI does not provide `-MinSizeMB` or `-MaxAgeDays`.
 - The report section 7 real-quarantine integration assertion is not exercised by the sandbox harness.
 - WSL-specific awareness is limited.
 - GitHub Actions still emits a non-blocking `actions/checkout@v4` Node runtime deprecation warning.

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added multi-drive batch execution with `-Drives` for [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1), [`scripts/clean-drive.ps1`](scripts/clean-drive.ps1), and [`scripts/verify-report.ps1`](scripts/verify-report.ps1); cleanup remains sequential and approval-gated.
+- Added multi-drive batch execution with `-Drives` for [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1), [`scripts/clean-drive.ps1`](scripts/clean-drive.ps1), and [`scripts/verify-report.ps1`](scripts/verify-report.ps1). The optional `scan-drive.ps1 -Parallel` path scans multiple drives concurrently, and scan and cleanup deliver category-level progress; cleanup remains sequential and approval-gated.
 - Added scan and cleanup checkpoints with `-Resume`, plus policy-based scheduling through [`scripts/schedule.ps1`](scripts/schedule.ps1) and the [`references/policies/`](references/policies/) profiles.
 
 ### Changed

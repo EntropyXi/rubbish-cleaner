@@ -8,7 +8,7 @@
 
 ### 新增
 
-- 为 [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1)、[`scripts/clean-drive.ps1`](scripts/clean-drive.ps1) 和 [`scripts/verify-report.ps1`](scripts/verify-report.ps1) 增加了使用 `-Drives` 的多驱动器批量执行；清理仍按顺序执行且必须获得批准。
+- 为 [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1)、[`scripts/clean-drive.ps1`](scripts/clean-drive.ps1) 和 [`scripts/verify-report.ps1`](scripts/verify-report.ps1) 增加了使用 `-Drives` 的多驱动器批量执行。可选的 `scan-drive.ps1 -Parallel` 路径会并发扫描多个驱动器，扫描和清理会按类别发布进度；清理仍按顺序执行且必须获得批准。
 - 增加了扫描和清理检查点及 `-Resume`，并通过 [`scripts/schedule.ps1`](scripts/schedule.ps1) 和 [`references/policies/`](references/policies/) 配置文件提供基于策略的计划任务。
 
 ### 变更
