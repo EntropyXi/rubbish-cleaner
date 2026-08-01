@@ -6,6 +6,7 @@
 .omo/boulder.json
 .codegraph/
 __pycache__/
+*.pyc
 *.py[cod]
 .env
 .venv
