@@ -4,7 +4,18 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-一个可被 Claude Code / Codex / opencode 调用的磁盘垃圾清理技能。
+一个可被 Claude Code / Codex / opencode 调用的磁盘垃圾清理技能。更新历史：[CHANGELOG.md](CHANGELOG.md)（简体中文版：[CHANGELOG_zh.md](CHANGELOG_zh.md)）。
+
+## 文档
+
+本仓库所有文档均为中英双语、成对维护：
+
+- [README.md](README.md) ↔ [README_zh.md](README_zh.md)（本概览）
+- [SKILL.md](SKILL.md) ↔ [SKILL_zh.md](SKILL_zh.md)（agent 技能核心）
+- [CHANGELOG.md](CHANGELOG.md) ↔ [CHANGELOG_zh.md](CHANGELOG_zh.md)（更新历史）
+- [references/junk-taxonomy.md](references/junk-taxonomy.md) ↔ [references/junk-taxonomy_zh.md](references/junk-taxonomy_zh.md)
+- [references/per-app-path-map.md](references/per-app-path-map.md) ↔ [references/per-app-path-map_zh.md](references/per-app-path-map_zh.md)
+- [references/safety-rules.md](references/safety-rules.md) ↔ [references/safety-rules_zh.md](references/safety-rules_zh.md)
 
 ## 快速开始
 

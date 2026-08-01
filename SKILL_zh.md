@@ -11,6 +11,8 @@ description: >
 
 ![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
 
+[English](SKILL.md) | [简体中文](SKILL_zh.md)
+
 扫描指定驱动器，对垃圾文件（临时文件、缓存、日志、空目录、重复压缩包、根目录可疑
 dll/exe 等）分类列出，经用户批准后**安全**清理，并产出验证报告。清理规则全部来自
 已实际执行验证过的 C 盘 / D 盘清理计划（详见 [junk-taxonomy.md](references/junk-taxonomy.md) 的源流）。

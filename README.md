@@ -4,7 +4,18 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode.
+An agent-callable drive junk-cleanup skill for Claude Code, Codex and opencode. Release history: [CHANGELOG](CHANGELOG.md) (简体中文: [CHANGELOG_zh](CHANGELOG_zh.md)).
+
+## 文档
+
+Every document in this repository ships in English and Simplified Chinese, maintained in pairs:
+
+- [README.md](README.md) ↔ [README_zh.md](README_zh.md) (overview)
+- [SKILL.md](SKILL.md) ↔ [SKILL_zh.md](SKILL_zh.md) (agent-facing skill core)
+- [CHANGELOG.md](CHANGELOG.md) ↔ [CHANGELOG_zh.md](CHANGELOG_zh.md) (release history)
+- [references/junk-taxonomy.md](references/junk-taxonomy.md) ↔ [references/junk-taxonomy_zh.md](references/junk-taxonomy_zh.md)
+- [references/per-app-path-map.md](references/per-app-path-map.md) ↔ [references/per-app-path-map_zh.md](references/per-app-path-map_zh.md)
+- [references/safety-rules.md](references/safety-rules.md) ↔ [references/safety-rules_zh.md](references/safety-rules_zh.md)
 
 ## Quick Start
 
