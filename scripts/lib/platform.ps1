@@ -158,14 +158,11 @@ function Get-UserCacheDir {
     return ($env:HOME + '/.cache')
 }
 
-# Returns the system temp directory:
-#   Windows -> $env:TEMP
-#   Linux/macOS -> '/tmp'
+# Returns the normalized temp root selected by the current .NET runtime.
+# This avoids false mismatches between Windows 8.3 aliases in $env:TEMP and
+# the long path returned by Path.GetTempPath(), and respects POSIX TMPDIR.
 function Get-SystemTempDir {
-    if ($script:IsWin) {
-        return $env:TEMP
-    }
-    return '/tmp'
+    return [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
 }
 
 # Returns the user documents directory:

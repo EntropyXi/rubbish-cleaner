@@ -204,8 +204,10 @@ Describe 'PlatformDetection' {
         [string]::IsNullOrWhiteSpace((Get-UserCacheDir)) | Should -BeFalse
     }
 
-    It 'resolves non-empty system temp and documents directories' {
-        [string]::IsNullOrWhiteSpace((Get-SystemTempDir)) | Should -BeFalse
+    It 'resolves the normalized runtime temp root and a non-empty documents directory' {
+        $systemTemp = Get-SystemTempDir
+        $systemTemp | Should -Be ([System.IO.Path]::GetTempPath().TrimEnd('\', '/'))
+        Test-Path -LiteralPath $systemTemp -PathType Container | Should -BeTrue
         [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)) | Should -BeFalse
     }
 }

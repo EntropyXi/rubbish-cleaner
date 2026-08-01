@@ -41,7 +41,8 @@ BeforeAll {
     $script:JunctionLink = Join-Path (New-TestDir 'links') 'reparse-link'
     $script:ReparseCreated = $false
     try {
-        New-Item -ItemType Junction -Path $script:JunctionLink -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $script:JunctionLink -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
         $script:ReparseCreated = $true
     } catch {
         try {
@@ -75,7 +76,8 @@ Describe 'Test-DirEmpty' {
         }
         $d = New-TestDir 'only-reparse-child'
         $link = Join-Path $d 'link'
-        New-Item -ItemType Junction -Path $link -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $link -Target $script:JunctionTarget -ErrorAction Stop | Out-Null
         Test-IsJunction -Path $link | Should -BeTrue
         Test-DirEmpty -Path $d | Should -BeTrue
     }

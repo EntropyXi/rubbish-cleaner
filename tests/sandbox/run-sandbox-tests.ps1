@@ -171,7 +171,8 @@ $suite1 = {
     $link = Join-Path $onlyReparse 'link'
     $reparseCreated = $false
     try {
-        New-Item -ItemType Junction -Path $link -Target $target -ErrorAction Stop | Out-Null
+        $linkType = if ($script:IsWin) { 'Junction' } else { 'SymbolicLink' }
+        New-Item -ItemType $linkType -Path $link -Target $target -ErrorAction Stop | Out-Null
         $reparseCreated = $true
     } catch {
         try {
@@ -260,7 +261,13 @@ $suite2 = {
     # tree. NOTE: Get-JunkCandidates returns generic List[object] collections,
     # which PS 5.1 cannot unroll with @() (throws argument type mismatch);
     # .ToArray() -> object[] is portable across PS 5.1 and 7.
-    $result = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps', 'root-logs', 'duplicate-archives', 'empty-dirs', 'root-suspicious')
+    $detectedIsWin = $script:IsWin
+    try {
+        $script:IsWin = $true
+        $result = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps', 'root-logs', 'duplicate-archives', 'empty-dirs', 'root-suspicious')
+    } finally {
+        $script:IsWin = $detectedIsWin
+    }
     $rows      = @($result.Rows.ToArray())
     $evaluated = @($result.Evaluated.ToArray())
 
@@ -297,6 +304,18 @@ $suite2 = {
 
     # exactly the 5 whitelisted categories were evaluated
     Assert-Equal 'evaluated categories count = 5' 5 $evaluated.Count
+
+    # The POSIX dispatcher owns root-temps on non-Windows and must not run in
+    # addition to the Windows/common implementation.
+    $detectedIsWin = $script:IsWin
+    try {
+        $script:IsWin = $false
+        $posixResult = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps')
+    } finally {
+        $script:IsWin = $detectedIsWin
+    }
+    $posixNames = @($posixResult.Evaluated.ToArray() | ForEach-Object { $_.name })
+    Assert-Equal 'POSIX root-temps evaluated once' 1 @($posixNames | Where-Object { $_ -eq 'root-temps' }).Count
 }
 
 # =====================================================================
@@ -328,11 +347,16 @@ $suite3 = {
     } finally {
         if ($null -ne $handle) { $handle.Close() }
     }
-    Assert-Equal 'Invoke-SafeRemove: locked file survives' $true (Test-Path -LiteralPath $locked)
-    Assert-Equal 'Test-FileLocked: after handle release reports false' $false (Test-FileLocked -LiteralPath $locked)
+    if ($script:IsWin) {
+        Assert-Equal 'Invoke-SafeRemove: locked file survives on Windows' $true (Test-Path -LiteralPath $locked)
+        Assert-Equal 'Test-FileLocked: after handle release reports false' $false (Test-FileLocked -LiteralPath $locked)
+    } else {
+        Assert-Equal 'Invoke-SafeRemove: open file unlinked on POSIX' $false (Test-Path -LiteralPath $locked)
+    }
     $lkRows = @(Get-CleanupRowsFrom -CsvPath $csv | Where-Object { $_.Path -eq $locked })
-    Assert-Equal 'Invoke-SafeRemove: SKIP_LOCKED row count' 1 $lkRows.Count
-    Assert-Equal 'Invoke-SafeRemove: SKIP_LOCKED disposition' 'SKIP_LOCKED' $lkRows[0].Disposition
+    Assert-Equal 'Invoke-SafeRemove: platform result row count' 1 $lkRows.Count
+    $expectedDisposition = if ($script:IsWin) { 'SKIP_LOCKED' } else { 'OK' }
+    Assert-Equal 'Invoke-SafeRemove: platform disposition' $expectedDisposition $lkRows[0].Disposition
 
     # quarantine -> source gone, dest present, QUARANTINED row
     $qsrc = Join-Path $base 'quarantine-src.txt'
@@ -602,6 +626,7 @@ $suite7 = {
     Assert-Equal 'PlatformDetection: resolver rejects an invalid drive' $null (Resolve-FixedDrive -Drive 'not-a-drive')
     Assert-True 'PlatformDetection: user cache dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserCacheDir)))
     Assert-Equal 'PlatformDetection: system temp dir matches the OS temp root' ([System.IO.Path]::GetTempPath().TrimEnd('\', '/')) (Get-SystemTempDir)
+    Assert-True 'PlatformDetection: system temp dir exists' (Test-Path -LiteralPath (Get-SystemTempDir) -PathType Container)
     Assert-True 'PlatformDetection: user documents dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)))
 }
 

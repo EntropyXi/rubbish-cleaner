@@ -59,7 +59,7 @@ drive cleanup、cache cleanup、clean temp files 时触发。扫描为只读（�
 1. **只删扫描结果**：clean-drive.ps1 只处理 candidates.csv 列出的行，CSV 之外一律不碰。
 2. **-LiteralPath + junction 感知**：绝不用裸 `-Path`/裸 `-Recurse`（PS 5.1 的
    `-Recurse` 会跟随 NTFS junction）。
-3. **锁定即跳过**：被占用的文件记 `SKIP_LOCKED`，绝不强删、绝不强杀进程。
+3. **遵循文件系统锁语义**：Windows 报告为锁定的文件记 `SKIP_LOCKED`；POSIX 允许 unlink 打开中的文件。任何平台都不强杀进程。
 4. **7 天规则**：临时文件只删 7 天以前的；删除前立即重验。
 5. **隔离即移动**：CAUTION 项（根目录 dll/exe）Move-Item 到隔离目录，永不删除。
 

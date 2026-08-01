@@ -81,7 +81,15 @@ BeforeAll {
     Set-Content -LiteralPath (Join-Path $keep 'userfile.txt') -Value 'user data'
 
     # ---- run the shared classifier (all categories, non-user drive) ------
-    $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false
+    # This fixture exercises the Windows/common root-category templates on
+    # every host. POSIX-specific dispatch is covered by a separate test below.
+    $detectedIsWin = $script:IsWin
+    try {
+        $script:IsWin = $true
+        $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false
+    } finally {
+        $script:IsWin = $detectedIsWin
+    }
     # NOTE: Get-JunkCandidates returns generic List[object] collections, which
     # PS 5.1 cannot unroll with the @() operator (throws "argument type
     # mismatch"); .ToArray() -> object[] is portable across PS 5.1 and 7.
@@ -150,6 +158,18 @@ Describe 'scan classification' {
         foreach ($n in @('root-temps', 'root-logs', 'duplicate-archives', 'empty-dirs', 'recycle-bin', 'root-suspicious', 'app-caches')) {
             $names -contains $n | Should -BeTrue
         }
+    }
+
+    It 'evaluates root-temps exactly once through the POSIX implementation' {
+        $detectedIsWin = $script:IsWin
+        try {
+            $script:IsWin = $false
+            $result = Get-JunkCandidates -RootPath $script:FakeRoot -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps')
+        } finally {
+            $script:IsWin = $detectedIsWin
+        }
+        $names = @($result.Evaluated.ToArray() | ForEach-Object { $_.name })
+        @($names | Where-Object { $_ -eq 'root-temps' }).Count | Should -Be 1
     }
 
     It 'every candidate row carries the full CSV schema (Category|Risk|Path|SizeBytes|FileCount|Action) and a fixed risk->action mapping' {

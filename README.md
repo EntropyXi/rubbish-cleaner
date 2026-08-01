@@ -55,7 +55,7 @@ Prompt examples:
 2. `/rubbish-cleaner Clean drive D: - remove temp files and app caches older than 30 days, but skip anything in D:\Downloads and D:\Games.`
 3. `/rubbish-cleaner What junk is on E:? Only list browser caches and logs.`
 
-The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; locked files are skipped) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`). Windows stores this under the Desktop as before; Linux/macOS use `$HOME/.omo/`.
+The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; files that Windows reports as locked are skipped, while POSIX may unlink an open file according to native filesystem semantics) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`). Windows stores this under the Desktop as before; Linux/macOS use `$HOME/.omo/`.
 
 Safety: everything is per-drive and per-run scoped; nothing is permanently deleted (quarantined); each deletion is re-verified right before it happens; junction-aware; UAC-elevated system cleanup is optional and skip-if-denied.
 

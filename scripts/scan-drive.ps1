@@ -337,7 +337,7 @@ function Get-JunkCandidates {
     # root-temps (SAFE): top-level FILES older than 7 days in
     # <Drive>\Temp, <Drive>\tmp, <Drive>\temp -- never subdirs.
     # ----------------------------------------------------------------
-    if (-not $catFilter -or $catFilter -contains 'root-temps') {
+    if ($script:IsWin -and (-not $catFilter -or $catFilter -contains 'root-temps')) {
         Update-CategoryProgress -Pg $pg -Category 'root-temps'
         if (-not $resumeSkipped.ContainsKey('root-temps')) {
             $result.Evaluated.Add(@{ name = 'root-temps'; risk = 'SAFE' })

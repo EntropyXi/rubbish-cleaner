@@ -24,8 +24,8 @@ function Test-DirEmpty {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
 
     foreach ($child in Get-ChildItem -LiteralPath $Path -Force) {
-        # Never descend into reparse points (junctions / symlinks).
-        if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+        # Never descend into Windows reparse points or POSIX symbolic links.
+        if (Test-IsJunction -Path $child.FullName) { continue }
 
         if ($child.PSIsContainer) {
             # Recurse into non-junction subdirs by hand.
@@ -38,13 +38,21 @@ function Test-DirEmpty {
     return $true
 }
 
-# (b) Returns $true when $Path is a reparse point (junction).
+# (b) Returns $true when $Path is a Windows reparse point or a POSIX link.
+# The legacy function name is retained because it is used throughout the
+# scanner; LinkType is the cross-platform filesystem-provider signal.
 function Test-IsJunction {
     param([string]$Path)
 
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $item) { return $false }
-    return (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $true
+    }
+
+    $linkTypeProperty = $item.PSObject.Properties['LinkType']
+    return ($null -ne $linkTypeProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$linkTypeProperty.Value))
 }
 
 # (c) Per-item safe removal. Removes one item with try/catch and records the
