@@ -150,7 +150,12 @@ function Write-CleanupCsv {
 function Get-DriveFreeSpace {
     param([string]$DriveLetter)
 
-    return (Get-Volume -DriveLetter $DriveLetter).SizeRemaining
+    $drive = if ($script:IsWin) { $DriveLetter.TrimEnd(':') + ':' } else { '/' }
+    $info = Resolve-FixedDrive -Drive $drive
+    if ($null -eq $info) {
+        throw "Drive '$DriveLetter' is not an available fixed local volume."
+    }
+    return [int64]$info.Free
 }
 
 # (g) Fixed set of disposal outcomes used across the pipeline.

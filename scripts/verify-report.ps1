@@ -38,11 +38,12 @@ param(
     [string]$Drive,                                             # e.g. 'D:' (single-drive mode)
     [string[]]$Drives,                                          # todo 8: multi-drive batch, e.g. @('D:','E:')
     [string]$RunDir,                                            # run dir from scan/clean, e.g. <OutDir>\D-<timestamp>; newest under $OutDir when omitted
-    [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner"
+    [string]$OutDir
 )
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
 . (Join-Path $PSScriptRoot 'lib\rubbish-core.ps1')
+if (-not $OutDir) { $OutDir = Get-DefaultEvidenceDir }
 
 $ToleranceBytes = 500000000            # +-500 MB (decimal MB) reconciliation tolerance
 $utf8NoBom      = New-Object System.Text.UTF8Encoding($false)
@@ -67,16 +68,12 @@ function Invoke-DriveVerify {
 # =====================================================================
 # (0) validate the drive and resolve the run directory
 # =====================================================================
-$driveLetter = $Drive.TrimEnd(':').ToUpperInvariant()
-if ($Drive -notmatch '^[A-Za-z]:$') {
-    Write-Error "Invalid drive '$Drive'. Expected a drive letter like 'D:'."
-    exit 1
-}
-$volume = Get-Volume -DriveLetter $driveLetter
+$volume = Resolve-FixedDrive -Drive $Drive
 if ($null -eq $volume) {
-    Write-Error "Volume for drive letter '$driveLetter' not found."
+    Write-Error "Drive '$Drive' is not an available fixed local volume."
     exit 1
 }
+$driveLetter = $volume.Id
 
 if (-not $RunDir) {
     $runs = Get-ChildItem -LiteralPath $OutDir -Directory -Filter "$driveLetter-*" -ErrorAction SilentlyContinue |
@@ -111,7 +108,7 @@ $processes    = if ($kv.ContainsKey('PROCESSES'))    { $kv['PROCESSES'] }       
 # =====================================================================
 # (3) re-read live free space as final
 # =====================================================================
-$finalFree = [long]$volume.SizeRemaining
+$finalFree = [long]$volume.Free
 $finalSize = [long]$volume.Size
 
 # =====================================================================
@@ -184,7 +181,7 @@ foreach ($cat in $catStats.Keys) { $estFreedTotal += $catStats[$cat].FreedBytes 
 # =====================================================================
 # Quarantine location derived from the drive letter, mirroring clean-drive.ps1's
 # default QuarantineDir ("$env:USERPROFILE\Desktop\.omo\quarantine\<letter>").
-$quarantineDir = Join-Path (Join-Path $env:USERPROFILE 'Desktop\.omo\quarantine') $driveLetter
+$quarantineDir = Get-DefaultQuarantineDir -DriveId $driveLetter
 
 $assertions = New-Object System.Collections.Generic.List[object]
 $qRows = @($cleanupRows | Where-Object { $_.Disposition -eq 'QUARANTINED' })
@@ -268,7 +265,7 @@ Add-SummaryLine ''
 # ---- section 2 ----
 Add-SummaryLine '## 2. Final Free Space'
 Add-SummaryLine ''
-Add-SummaryLine ("Measured live: ``(Get-Volume -DriveLetter {0}).SizeRemaining``" -f $driveLetter)
+Add-SummaryLine ("Measured live from fixed volume ``{0}``" -f $volume.Root)
 Add-SummaryLine ("- **{0} bytes** ({1})" -f (Format-Bytes $finalFree), (Format-GiB $finalFree))
 Add-SummaryLine ("- Volume Size = {0} bytes" -f (Format-Bytes $finalSize))
 Add-SummaryLine ''

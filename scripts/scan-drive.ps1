@@ -32,7 +32,7 @@ param(
     [Parameter(ParameterSetName = 'MultiDrive')]
     [Parameter(ParameterSetName = 'SingleDrive')]
     [string[]]$Drives = $null,                                  # todo 8: multi-drive batch, e.g. @('D:','E:')
-    [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner",
+    [string]$OutDir,
     [switch]$IncludeElevated,                                   # enable elevated-system (report-only)
     [string[]]$Categories,                                      # filter; empty = all applicable
     [switch]$Resume,                                            # todo 4: resume from <run>\scan-checkpoint.json
@@ -43,6 +43,7 @@ param(
 . (Join-Path $PSScriptRoot 'lib\rubbish-core.ps1')
 # ---- dot-source the cross-platform detection layer (todo 2 deliverable) ----
 . (Join-Path $PSScriptRoot 'lib\platform.ps1')
+if (-not $OutDir) { $OutDir = Get-DefaultEvidenceDir }
 
 # =====================================================================
 # <begin-classification>
@@ -1005,12 +1006,11 @@ if ($drivesGiven) {
     New-Item -ItemType Directory -Force -Path $multiRoot | Out-Null
 
     # Subprocess executable + prefix args (todo 8 platform branch).
-    if ($script:IsWin) {
-        $scanExe = 'powershell.exe'
-        $scanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
+    $scanExe = Get-PowerShellExecutable
+    $scanPfx = if ($script:IsWin) {
+        @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
     } else {
-        $scanExe = 'pwsh'
-        $scanPfx = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
+        @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'scan-drive.ps1'))
     }
 
     # Builds the argument list handed to one per-drive scan subprocess.
@@ -1030,7 +1030,9 @@ if ($drivesGiven) {
     # (the NEWEST <Letter>-* dir under $OutDir for that drive).
     function Resolve-DriveRunDir {
         param([string]$DriveArg)
-        $prefix = if ($script:IsWin) { $DriveArg.TrimEnd(':').ToUpperInvariant() } else { $DriveArg.TrimEnd(':') }
+        $driveInfo = Resolve-FixedDrive -Drive $DriveArg
+        if ($null -eq $driveInfo) { return $null }
+        $prefix = $driveInfo.Id
         $dir = @(Get-ChildItem -LiteralPath $OutDir -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -like "$prefix-*" } |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -1146,25 +1148,12 @@ if ($drivesGiven) {
 }
 
 # ---- Drive validation -------------------------------------------------
-# 1. syntax: ^[A-Za-z]:$
-if ($Drive -notmatch '^[A-Za-z]:$') {
-    Write-Error "Invalid -Drive '$Drive': expected a drive letter and colon (e.g. 'D:')."
+$volume = Resolve-FixedDrive -Drive $Drive
+if ($null -eq $volume) {
+    Write-Error "Drive '$Drive' is not an available fixed local volume. Refusing to scan removable/network media."
     exit 1
 }
-$driveLetter = $Drive.TrimEnd(':')
-
-# 2. the drive must exist
-if (-not (Test-Path -LiteralPath "$Drive\")) {
-    Write-Error "Drive '$Drive' does not exist."
-    exit 1
-}
-
-# 3. must be a Fixed (local hard disk) volume
-$vol = Get-Volume -DriveLetter $driveLetter
-if ($null -eq $vol -or $vol.DriveType -ne 'Fixed') {
-    Write-Error "Drive '$Drive' is not a fixed local volume (DriveType='$($vol.DriveType)'). Refusing to scan removable/network media."
-    exit 1
-}
+$driveLetter = $volume.Id
 
 # ---- User-profile scope ------------------------------------------------
 # User-profile categories apply ONLY when the user profile lives on $Drive.
@@ -1213,8 +1202,8 @@ if ($Resume.IsPresent) {
 $checkpointState = New-ScanCheckpointState -Path (Join-Path $runDir 'scan-checkpoint.json') -Drive $Drive
 
 # ---- Pre-flight (exactly 3 key=value lines, parseable by verify-report) --
-$baselineFree = (Get-Volume -DriveLetter $driveLetter).SizeRemaining
-$totalBytes   = (Get-Volume -DriveLetter $driveLetter).Size
+$baselineFree = [int64]$volume.Free
+$totalBytes   = [int64]$volume.Size
 $processes    = @(Get-Process chrome, msedge, WeChat, WeChatApp, Weixin, WeGame, steam, pip, npm -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Name)
 $preflight = @(
@@ -1226,7 +1215,7 @@ $preflight = @(
 
 # ---- Classify ----------------------------------------------------------
 Write-Output "SCANNING $Drive (isUserDrive=$isUserDrive, includeElevated=$($IncludeElevated.IsPresent)) -> $runDir"
-$scan = Get-JunkCandidates -RootPath "$Drive\" -IsUserDrive $isUserDrive -IncludeElevated $IncludeElevated.IsPresent -Categories $Categories -Checkpoint $checkpointState -ResumeState $resumeState
+$scan = Get-JunkCandidates -RootPath $volume.Root -IsUserDrive $isUserDrive -IncludeElevated $IncludeElevated.IsPresent -Categories $Categories -Checkpoint $checkpointState -ResumeState $resumeState
 
 # ---- candidates.csv (header `Category|Risk|Path|SizeBytes|FileCount|Action`) --
 # On -Resume, rows already in the run dir's candidates.csv are preserved

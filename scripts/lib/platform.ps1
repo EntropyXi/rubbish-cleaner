@@ -56,15 +56,88 @@ if ($script:IsPwsh7) {
 
 # --- Helper functions ------------------------------------------------------
 
+# Resolves a supported, ready local fixed volume. Windows accepts a drive
+# letter such as C:; Linux/macOS accept only their filesystem root (/).
+# Returns $null for invalid, unavailable, removable, or network volumes.
+function Resolve-FixedDrive {
+    param([string]$Drive)
+
+    if ($script:IsWin) {
+        if ($Drive -notmatch '^[A-Za-z]:$') { return $null }
+        $normalizedDrive = $Drive.Substring(0, 1).ToUpperInvariant() + ':'
+        $root = $normalizedDrive + '\'
+        $id = $normalizedDrive.TrimEnd(':')
+    } else {
+        if ($Drive -ne '/') { return $null }
+        $normalizedDrive = '/'
+        $root = '/'
+        $id = 'ROOT'
+    }
+
+    try {
+        $info = [System.IO.DriveInfo]::new($root)
+        if (-not $info.IsReady -or $info.DriveType -ne [System.IO.DriveType]::Fixed) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Drive     = $normalizedDrive
+            Id        = $id
+            Root      = $root
+            DriveType = [string]$info.DriveType
+            Size      = [int64]$info.TotalSize
+            Free      = [int64]$info.AvailableFreeSpace
+        }
+    } catch {
+        return $null
+    }
+}
+
 # Returns the fixed-drive root letters on Windows, e.g. @('C:\','D:\'),
 # or @('/') on Linux/macOS.
 function Get-FixedDriveLetters {
-    if ($script:IsWin) {
-        return @(Get-PSDrive -PSProvider FileSystem |
-            Where-Object { $_.Free -gt 0 } |
-            ForEach-Object { $_.Root })
+    if (-not $script:IsWin) {
+        if ($null -ne (Resolve-FixedDrive -Drive '/')) { return @('/') }
+        return @()
     }
-    return @('/')
+
+    $roots = New-Object System.Collections.Generic.List[string]
+    foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($drive.IsReady -and $drive.DriveType -eq [System.IO.DriveType]::Fixed) {
+                $roots.Add($drive.RootDirectory.FullName) | Out-Null
+            }
+        } catch {
+            # Unavailable drives are not candidates.
+        }
+    }
+    return @($roots.ToArray())
+}
+
+# Default evidence/quarantine roots preserve Windows paths and use the user's
+# home directory on Linux/macOS.
+function Get-DefaultEvidenceDir {
+    if ($script:IsWin) {
+        return (Join-Path $env:USERPROFILE 'Desktop\.omo\evidence\rubbish-cleaner')
+    }
+    return (Join-Path $env:HOME '.omo/evidence/rubbish-cleaner')
+}
+
+function Get-DefaultQuarantineDir {
+    param([string]$DriveId)
+
+    if ($script:IsWin) {
+        return (Join-Path (Join-Path $env:USERPROFILE 'Desktop\.omo\quarantine') $DriveId)
+    }
+    return (Join-Path (Join-Path $env:HOME '.omo/quarantine') $DriveId)
+}
+
+# Returns the PowerShell host matching the current runtime.
+function Get-PowerShellExecutable {
+    if (-not $script:IsPwsh7) { return 'powershell.exe' }
+    $leaf = if ($script:IsWin) { 'pwsh.exe' } else { 'pwsh' }
+    $candidate = Join-Path $PSHOME $leaf
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    return 'pwsh'
 }
 
 # Returns the user cache directory:

@@ -50,7 +50,7 @@ param(
     [string]$Drive,                                               # e.g. 'D:' (single-drive mode; gates elevated-system)
     [string[]]$Drives,                                            # todo 8: multi-drive batch, e.g. @('D:','E:')
     [string]$CandidatesCsv,                                       # default: newest <OutDir>\<Drive>-*\candidates.csv
-    [string]$OutDir = "$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner",
+    [string]$OutDir,
     [string]$QuarantineDir,                                       # default: <out>\Desktop\.omo\quarantine\<letter> (computed per drive)
     [switch]$Yes,                                                 # approve ASK categories + run the elevated batch (no prompts)
     [string[]]$Categories,                                        # filter; empty = all categories present in the CSV
@@ -61,6 +61,7 @@ param(
 
 # ---- dot-source the safety function library (todo 3 deliverable) ----
 . (Join-Path $PSScriptRoot 'lib\rubbish-core.ps1')
+if (-not $OutDir) { $OutDir = Get-DefaultEvidenceDir }
 
 # Never inherit a stricter preference from the caller: per-item failures are
 # handled by try/catch inside the lib functions, everything else must keep
@@ -366,12 +367,11 @@ if ($drivesGiven) {
     # Subprocess executable + prefix args (todo 8 platform branch): each
     # drive is cleaned by its OWN clean-drive.ps1 subprocess so the per-drive
     # behaviour is identical to single-drive mode.
-    if ($script:IsWin) {
-        $cleanExe = 'powershell.exe'
-        $cleanPfx = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
+    $cleanExe = Get-PowerShellExecutable
+    $cleanPfx = if ($script:IsWin) {
+        @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
     } else {
-        $cleanExe = 'pwsh'
-        $cleanPfx = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
+        @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'clean-drive.ps1'))
     }
 
     $anyFailed = $false
@@ -399,34 +399,21 @@ if ($drivesGiven) {
 }
 
 # ---- Drive validation (same gates as scan-drive.ps1) ------------------
-# 1. syntax: ^[A-Za-z]:$
-if ($Drive -notmatch '^[A-Za-z]:$') {
-    Write-Error "Invalid -Drive '$Drive': expected a drive letter and colon (e.g. 'D:')."
+$volume = Resolve-FixedDrive -Drive $Drive
+if ($null -eq $volume) {
+    Write-Error "Drive '$Drive' is not an available fixed local volume. Refusing to clean removable/network media."
     exit 1
 }
-$driveLetter = $Drive.TrimEnd(':')
-
-# 2. the drive must exist
-if (-not (Test-Path -LiteralPath "$Drive\")) {
-    Write-Error "Drive '$Drive' does not exist."
-    exit 1
-}
-
-# 3. must be a Fixed (local hard disk) volume
-$vol = Get-Volume -DriveLetter $driveLetter
-if ($null -eq $vol -or $vol.DriveType -ne 'Fixed') {
-    Write-Error "Drive '$Drive' is not a fixed local volume (DriveType='$($vol.DriveType)'). Refusing to clean removable/network media."
-    exit 1
-}
+$driveLetter = $volume.Id
 
 # ---- Scope flags -------------------------------------------------------
 # User-profile drive? (gates the ELEVATED category).
-$isUserDrive  = $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase)
+$isUserDrive  = if ($script:IsWin) { $env:USERPROFILE.StartsWith($Drive, [System.StringComparison]::OrdinalIgnoreCase) } else { $Drive -eq '/' }
 # System drive? (the elevated batch may ONLY be launched here).
-$isSystemDrive = ($driveLetter -ieq $env:SystemDrive.TrimEnd(':'))
+$isSystemDrive = if ($script:IsWin) { $driveLetter -ieq $env:SystemDrive.TrimEnd(':') } else { $false }
 # Default quarantine dir is derived per drive. Evaluated lazily (not at
 # param-binding time) so -Drives mode never needs a -Drive to expand it.
-if (-not $QuarantineDir) { $QuarantineDir = "$env:USERPROFILE\Desktop\.omo\quarantine\$($Drive.TrimEnd(':'))" }
+if (-not $QuarantineDir) { $QuarantineDir = Get-DefaultQuarantineDir -DriveId $driveLetter }
 
 # ---- Locate candidates.csv ---------------------------------------------
 # Default: newest <OutDir>\<Drive>-*\candidates.csv (Get-ChildItem sorted by

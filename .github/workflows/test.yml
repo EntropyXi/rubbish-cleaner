@@ -43,3 +43,7 @@ jobs:
       - name: Run zero-dependency sandbox harness
         shell: pwsh
         run: ./tests/sandbox/run-sandbox-tests.ps1
+      - name: Run full test entry point on Windows PowerShell 5.1
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: .\tests\run-tests.ps1

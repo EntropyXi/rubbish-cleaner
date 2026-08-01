@@ -9,6 +9,12 @@ description: >
 
 # rubbish-cleaner
 
+## 卷兼容性
+
+- Windows 使用固定本地盘符，例如 `C:`；Linux/macOS 使用根目录 `/`。
+- 容量信息通过 .NET `DriveInfo` 获取，不依赖 Windows 专属的 `Get-Volume`。
+- Windows 的证据与隔离目录仍位于桌面 `.omo` 下；Linux/macOS 使用 `$HOME/.omo/`。
+
 ![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
 
 [English](SKILL.md) | [简体中文](SKILL_zh.md)

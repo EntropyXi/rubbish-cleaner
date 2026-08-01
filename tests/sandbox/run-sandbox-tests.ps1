@@ -38,25 +38,18 @@
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------
-# Test-drive auto-detection (replaces the previously hardcoded -Drive D:).
-# Picks the first fixed drive with used space on Windows, '/' elsewhere.
+# Test-drive auto-detection. The shared resolver must work even when
+# Get-PSDrive does not expose Used/Free metadata (for example, restricted
+# Windows sessions).
 # ---------------------------------------------------------------------
 . (Join-Path $PSScriptRoot '../../scripts/lib/platform.ps1')
-if ($script:IsWin) {
-    $script:TestDrive = ((Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -gt 0 -and $_.Root -match '^[A-Z]:\\$' } | Select-Object -First 1).Root).TrimEnd('\')
-} else {
-    $script:TestDrive = '/'
-}
-if (-not $script:TestDrive) { $script:TestDrive = 'C:' }
-if ($script:IsWin) {
-    $probePath = $script:TestDrive.TrimEnd(':') + ':\'
-} else {
-    $probePath = '/'
-}
-if (-not (Test-Path -LiteralPath $probePath)) {
+$script:TestDrive = if ($script:IsWin) { 'C:' } else { '/' }
+$script:TestDriveInfo = Resolve-FixedDrive -Drive $script:TestDrive
+if ($null -eq $script:TestDriveInfo) {
     Write-Output 'SKIP: no fixed drive available for test fixtures'
     exit 0
 }
+$script:PowerShellExe = Get-PowerShellExecutable
 
 # ---------------------------------------------------------------------
 # Repo layout (all paths absolute; nothing is hardcoded to the machine).
@@ -368,7 +361,7 @@ $suite3 = {
     $candLines.Add(('empty-dirs|SAFE|{0}|0|0|delete' -f $nonEmptyTarget))
     [System.IO.File]::WriteAllLines($candCsv, $candLines.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
 
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:CleanDrivePath -Drive $script:TestDrive -CandidatesCsv $candCsv -QuarantineDir (Join-Path $base 'q') -Yes | Out-Null
+    & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:CleanDrivePath -Drive $script:TestDrive -CandidatesCsv $candCsv -QuarantineDir (Join-Path $base 'q') -Yes | Out-Null
     Assert-Equal 'clean-drive.ps1: exit code 0' 0 $LASTEXITCODE
     Assert-Equal 'clean-drive.ps1: empty dir REMOVED' $false (Test-Path -LiteralPath $emptyTarget)
     Assert-Equal 'clean-drive.ps1: non-empty dir SURVIVES' $true (Test-Path -LiteralPath $nonEmptyTarget -PathType Container)
@@ -403,7 +396,7 @@ $suite4 = {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
     # ---- preflight.txt ---------------------------------------------------
-    $baseline = [long](Get-Volume -DriveLetter $script:TestDrive.TrimEnd(':')).SizeRemaining - 100000000
+    $baseline = [long]$script:TestDriveInfo.Free - 100000000
     [System.IO.File]::WriteAllLines((Join-Path $runDir 'preflight.txt'), @("BASELINE_FREE_BYTES=$baseline"), $utf8NoBom)
 
     # ---- fixture paths ---------------------------------------------------
@@ -438,7 +431,7 @@ $suite4 = {
     [System.IO.File]::WriteAllLines((Join-Path $runDir 'candidates.csv'), $candLines, $utf8NoBom)
 
     # ---- run verify-report as a subprocess --------------------------------
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:VerifyReportPath -Drive $script:TestDrive -RunDir $runDir | Out-Null
+    & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:VerifyReportPath -Drive $script:TestDrive -RunDir $runDir | Out-Null
     Assert-Equal 'verify-report.ps1: exit code 0' 0 $LASTEXITCODE
 
     # ---- summary.md assertions --------------------------------------------
@@ -540,11 +533,11 @@ $suite6 = {
 
     # ---- (A) checkpoint PRODUCED after a 2-category scan -----------------
     $cpPath = Join-Path $base 'scan-checkpoint.json'
-    $state  = New-ScanCheckpointState -Path $cpPath -Drive 'C:'
+    $state  = New-ScanCheckpointState -Path $cpPath -Drive $script:TestDrive
     $r = Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps','root-logs') -Checkpoint $state
     Assert-Equal 'CheckpointResume: checkpoint file written' $true (Test-Path -LiteralPath $cpPath -PathType Leaf)
     $cp = Get-Content -LiteralPath $cpPath -Raw | ConvertFrom-Json
-    Assert-Equal 'CheckpointResume: checkpoint drive = C:' 'C:' ([string]$cp.drive)
+    Assert-Equal 'CheckpointResume: checkpoint drive matches fixture drive' $script:TestDrive ([string]$cp.drive)
     Assert-True 'CheckpointResume: root-temps marked complete' (@($cp.completedCategories) -contains 'root-temps')
     Assert-True 'CheckpointResume: root-logs marked complete' (@($cp.completedCategories) -contains 'root-logs')
 
@@ -584,7 +577,7 @@ $suite6 = {
     $runDir = Join-Path $outDir ("C-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     New-Item -ItemType Directory -Force -Path $runDir | Out-Null
     $cpJson = [ordered]@{
-        drive               = 'C:'
+        drive               = $script:TestDrive
         completedCategories = @('root-temps')
         currentCategory     = 'root-logs'
         lastPath            = ''
@@ -593,7 +586,7 @@ $suite6 = {
     }
     [System.IO.File]::WriteAllText((Join-Path $runDir 'scan-checkpoint.json'),
         (ConvertTo-Json -InputObject $cpJson), (New-Object System.Text.UTF8Encoding($false)))
-    $subOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drive C: -OutDir $outDir -Resume -Categories root-temps,root-logs
+    $subOut = & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drive $script:TestDrive -OutDir $outDir -Resume -Categories root-temps,root-logs
     Assert-Equal 'CheckpointResume: resume subprocess exit 0' 0 $LASTEXITCODE
     Assert-True 'CheckpointResume: resume skip message printed' (($subOut | Out-String) -match 'RESUME: resuming from')
 }
@@ -603,8 +596,10 @@ $suite6 = {
 # =====================================================================
 $suite7 = {
     . (Join-Path $script:RepoRoot 'scripts\lib\platform.ps1')
-    Assert-Equal 'PlatformDetection: IsWindows true on this machine' $true ([bool]$script:IsWin)
+    Assert-Equal 'PlatformDetection: exactly one supported platform is detected' 1 @($script:IsWin, $script:IsLx, $script:IsMac | Where-Object { $_ }).Count
     Assert-True 'PlatformDetection: at least 1 fixed drive letter' (@(Get-FixedDriveLetters).Count -ge 1)
+    Assert-Equal 'PlatformDetection: resolver returns the selected fixed drive' $script:TestDrive $script:TestDriveInfo.Drive
+    Assert-Equal 'PlatformDetection: resolver rejects an invalid drive' $null (Resolve-FixedDrive -Drive 'not-a-drive')
     Assert-True 'PlatformDetection: user cache dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserCacheDir)))
     Assert-Equal 'PlatformDetection: system temp dir matches the OS temp root' ([System.IO.Path]::GetTempPath().TrimEnd('\', '/')) (Get-SystemTempDir)
     Assert-True 'PlatformDetection: user documents dir non-empty' (-not [string]::IsNullOrWhiteSpace((Get-UserDocumentsDir)))
@@ -620,27 +615,35 @@ $suite8 = {
     $policyDir = Join-Path $script:RepoRoot 'references\policies'
 
     # ---- -Action List exits 0 -------------------------------------------
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $sched -Action List | Out-Null
+    & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $sched -Action List | Out-Null
     Assert-Equal 'ScheduleParams: -Action List exit 0' 0 $LASTEXITCODE
 
     # ---- Register on a NON-elevated shell -> admin error (exit 1) --------
     # Elevated shells SKIP this assertion (registration would succeed there).
-    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if ($isAdmin) {
-        Write-Output 'SUITE ScheduleParams: SKIP register-admin assertion (running elevated)'
+    if (-not $script:IsWin) {
+        Write-Output 'SUITE ScheduleParams: SKIP register-admin assertion (Windows Task Scheduler only)'
     } else {
-        # Start-Process redirects stderr to a file without generating error
-        # records: under $ErrorActionPreference 'Stop' a native stderr
-        # redirect (2> or 2>&1) would abort the harness on the Write-Error.
-        $errFile = Join-Path $base 'register-err.txt'
-        $outFile = Join-Path $base 'register-out.txt'
-        $proc = Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $sched, '-Action', 'Register', '-Drive', 'C:', '-Policy', 'safe') `
-            -Wait -PassThru -NoNewWindow -RedirectStandardError $errFile -RedirectStandardOutput $outFile
-        Assert-Equal 'ScheduleParams: non-elevated Register exits 1' 1 $proc.ExitCode
-        $errText = if (Test-Path -LiteralPath $errFile) { [System.IO.File]::ReadAllText($errFile) } else { '' }
-        Assert-True 'ScheduleParams: admin-required error message' ($errText -match 'administrator')
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($isAdmin) {
+            Write-Output 'SUITE ScheduleParams: SKIP register-admin assertion (running elevated)'
+        } else {
+            $errFile = Join-Path $base 'register-err.txt'
+            $outFile = Join-Path $base 'register-out.txt'
+            # Direct invocation avoids Start-Process's case-insensitive PATH/Path
+            # environment collision in restricted Windows sessions.
+            $priorPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $sched -Action Register -Drive $script:TestDrive -Policy safe 2>$errFile 1>$outFile
+                $registerExit = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $priorPreference
+            }
+            Assert-Equal 'ScheduleParams: non-elevated Register exits 1' 1 $registerExit
+            $errText = if (Test-Path -LiteralPath $errFile) { [System.IO.File]::ReadAllText($errFile) } else { '' }
+            Assert-True 'ScheduleParams: admin-required error message' ($errText -match 'administrator')
+        }
     }
 
     # ---- policy JSONs parse with a Categories array ----------------------
@@ -669,12 +672,16 @@ $suite9 = {
     New-Item -ItemType Directory -Force -Path $outSeq | Out-Null
     New-Item -ItemType Directory -Force -Path $outPar | Out-Null
 
-    $driveLetters = @(Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } | Select-Object -First 2 -ExpandProperty DriveLetter)
+    $driveLetters = @(
+        Get-FixedDriveLetters | ForEach-Object {
+            if ($script:IsWin) { ([string]$_).Substring(0, 1).ToUpperInvariant() + ':' } else { $_ }
+        } | Select-Object -First 2
+    )
     if ($driveLetters.Count -lt 2) {
         Write-Output 'SUITE MultiDrive: SKIP (fewer than 2 fixed drives)'
         return
     }
-    $drivesArg = (($driveLetters | ForEach-Object { $_.ToString() + ':' }) -join ',')
+    $drivesArg = ($driveLetters -join ',')
 
     function Assert-MultiDriveResult {
         param([string]$OutDir, [string]$Label)
@@ -693,17 +700,18 @@ $suite9 = {
         }
         Assert-Equal ("MultiDrive[{0}]: 2 distinct per-drive run dirs" -f $Label) 2 @($runDirs | Select-Object -Unique).Count
         foreach ($letter in $driveLetters) {
-            Assert-True ("MultiDrive[{0}]: run dir for drive {1} exists" -f $Label, $letter) (@(Get-ChildItem -LiteralPath $OutDir -Directory -Filter "$letter-*").Count -ge 1)
+            $runId = if ($script:IsWin) { $letter.TrimEnd(':') } else { 'ROOT' }
+            Assert-True ("MultiDrive[{0}]: run dir for drive {1} exists" -f $Label, $letter) (@(Get-ChildItem -LiteralPath $OutDir -Directory -Filter "$runId-*").Count -ge 1)
         }
     }
 
     # ---- sequential per-drive subprocesses -------------------------------
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outSeq -Categories root-temps,root-logs | Out-Null
+    & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outSeq -Categories root-temps,root-logs | Out-Null
     Assert-Equal 'MultiDrive: sequential -Drives exit 0' 0 $LASTEXITCODE
     Assert-MultiDriveResult -OutDir $outSeq -Label 'sequential'
 
     # ---- parallel per-drive subprocesses (same result) -------------------
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outPar -Categories root-temps,root-logs -Parallel | Out-Null
+    & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outPar -Categories root-temps,root-logs -Parallel | Out-Null
     Assert-Equal 'MultiDrive: parallel -Drives exit 0' 0 $LASTEXITCODE
     Assert-MultiDriveResult -OutDir $outPar -Label 'parallel'
 }

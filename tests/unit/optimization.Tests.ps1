@@ -15,7 +15,7 @@
 # [System.IO.Path]::GetTempPath(), the cross-platform temp root)
 # and are removed in AfterAll.
 #
-# scan-drive.ps1 validates a real fixed volume (Get-Volume), so its
+# scan-drive.ps1 validates a real fixed volume through platform.ps1, so its
 # classification logic is consumed through the same <begin-classification> /
 # <end-classification> seam used by scan.Tests.ps1; the multi-drive and resume
 # subprocess checks run against real fixed drives read-only with a tiny
@@ -41,6 +41,10 @@ BeforeAll {
 
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\rubbish-core.ps1')
     . (Join-Path $PSScriptRoot '..\..\scripts\lib\platform.ps1')
+    $script:TestDrive = if ($script:IsWin) { 'C:' } else { '/' }
+    $script:TestDriveInfo = Resolve-FixedDrive -Drive $script:TestDrive
+    if ($null -eq $script:TestDriveInfo) { throw 'no fixed drive available for optimization fixtures' }
+    $script:PowerShellExe = Get-PowerShellExecutable
 
     # ---- extract + dot-source the classification seam (as scan.Tests.ps1) --
     # NOTE: match the marker WITH the '# ' comment prefix (as the sandbox
@@ -115,12 +119,12 @@ Describe 'CheckpointResume' {
         [System.IO.File]::SetLastWriteTime($bootLog, (Get-Date).AddDays(-10))
 
         $cpPath = Join-Path (New-TestDir 'cp-files') 'scan-checkpoint.json'
-        $state = New-ScanCheckpointState -Path $cpPath -Drive 'C:'
+        $state = New-ScanCheckpointState -Path $cpPath -Drive $script:TestDrive
         Get-JunkCandidates -RootPath $root -IsUserDrive $false -IncludeElevated $false -Categories @('root-temps', 'root-logs') -Checkpoint $state | Out-Null
 
         Test-Path -LiteralPath $cpPath -PathType Leaf | Should -BeTrue
         $cp = Get-Content -LiteralPath $cpPath -Raw | ConvertFrom-Json
-        $cp.drive | Should -Be 'C:'
+        $cp.drive | Should -Be $script:TestDrive
         @($cp.completedCategories) -contains 'root-temps' | Should -BeTrue
         @($cp.completedCategories) -contains 'root-logs' | Should -BeTrue
     }
@@ -158,10 +162,10 @@ Describe 'CheckpointResume' {
     It '-Resume subprocess prints the skip/resume message' {
         $outDir = Join-Path $script:SuiteRoot 'cp-out'
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
-        $runDir = Join-Path $outDir ("C-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $runDir = Join-Path $outDir ("{0}-{1}" -f $script:TestDriveInfo.Id, (Get-Date -Format 'yyyyMMdd-HHmmss'))
         New-Item -ItemType Directory -Path $runDir -Force | Out-Null
         $cpJson = [ordered]@{
-            drive               = 'C:'
+            drive               = $script:TestDrive
             completedCategories = @('root-temps')
             currentCategory     = 'root-logs'
             lastPath            = ''
@@ -171,19 +175,29 @@ Describe 'CheckpointResume' {
         [System.IO.File]::WriteAllText((Join-Path $runDir 'scan-checkpoint.json'),
             (ConvertTo-Json -InputObject $cpJson), (New-Object System.Text.UTF8Encoding($false)))
 
-        $subOut = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drive C: -OutDir $outDir -Resume -Categories root-temps,root-logs
+        $subOut = & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drive $script:TestDrive -OutDir $outDir -Resume -Categories root-temps,root-logs
         $LASTEXITCODE | Should -Be 0
         (($subOut | Out-String) -match 'RESUME: resuming from') | Should -BeTrue
     }
 }
 
 Describe 'PlatformDetection' {
-    It 'detects Windows on this machine' {
-        $script:IsWin | Should -BeTrue
+    It 'detects exactly one supported platform' {
+        @($script:IsWin, $script:IsLx, $script:IsMac | Where-Object { $_ }).Count | Should -Be 1
     }
 
     It 'reports at least one fixed drive letter' {
         @(Get-FixedDriveLetters).Count | Should -BeGreaterThan 0
+    }
+
+    It 'resolves the selected fixed drive without Get-Volume' {
+        $script:TestDriveInfo.Drive | Should -Be $script:TestDrive
+        $script:TestDriveInfo.DriveType | Should -Be 'Fixed'
+        $script:TestDriveInfo.Size | Should -BeGreaterThan 0
+    }
+
+    It 'rejects an invalid drive without throwing' {
+        Resolve-FixedDrive -Drive 'not-a-drive' | Should -BeNullOrEmpty
     }
 
     It 'resolves a non-empty user cache directory' {
@@ -198,11 +212,15 @@ Describe 'PlatformDetection' {
 
 Describe 'ScheduleParams' {
     It '-Action List exits 0' {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:SchedulePath -Action List | Out-Null
+        & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:SchedulePath -Action List | Out-Null
         $LASTEXITCODE | Should -Be 0
     }
 
-    It 'non-elevated -Action Register -Drive C: -Policy safe exits 1 with an admin-required error' {
+    It 'non-elevated Windows Register exits 1 with an admin-required error' {
+        if (-not $script:IsWin) {
+            Set-ItResult -Skipped -Because 'Windows Task Scheduler is Windows-only'
+            return
+        }
         $p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
             Set-ItResult -Skipped -Because 'running elevated; registration would succeed'
@@ -210,10 +228,15 @@ Describe 'ScheduleParams' {
         }
         $errFile = Join-Path $script:SuiteRoot 'register-err.txt'
         $outFile = Join-Path $script:SuiteRoot 'register-out.txt'
-        $proc = Start-Process -FilePath 'powershell.exe' `
-            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:SchedulePath, '-Action', 'Register', '-Drive', 'C:', '-Policy', 'safe') `
-            -Wait -PassThru -NoNewWindow -RedirectStandardError $errFile -RedirectStandardOutput $outFile
-        $proc.ExitCode | Should -Be 1
+        $priorPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:SchedulePath -Action Register -Drive $script:TestDrive -Policy safe 2>$errFile 1>$outFile
+            $registerExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $priorPreference
+        }
+        $registerExit | Should -Be 1
         $errText = if (Test-Path -LiteralPath $errFile) { [System.IO.File]::ReadAllText($errFile) } else { '' }
         ($errText -match 'administrator') | Should -BeTrue
     }
@@ -231,16 +254,18 @@ Describe 'ScheduleParams' {
 
 Describe 'MultiDrive' {
     It '-Drives scans two fixed drives into two per-drive run dirs + a combined drives.csv' {
-        $driveLetters = @(Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } | Select-Object -First 2 -ExpandProperty DriveLetter)
+        $driveLetters = @(Get-FixedDriveLetters | ForEach-Object {
+            if ($script:IsWin) { ([string]$_).Substring(0, 1).ToUpperInvariant() + ':' } else { $_ }
+        } | Select-Object -First 2)
         if ($driveLetters.Count -lt 2) {
             Set-ItResult -Skipped -Because 'fewer than 2 fixed drives'
             return
         }
-        $drivesArg = (($driveLetters | ForEach-Object { $_.ToString() + ':' }) -join ',')
+        $drivesArg = ($driveLetters -join ',')
         $outDir = Join-Path $script:SuiteRoot 'md-out'
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outDir -Categories root-temps,root-logs | Out-Null
+        & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outDir -Categories root-temps,root-logs | Out-Null
         $LASTEXITCODE | Should -Be 0
 
         $multi = @(Get-ChildItem -LiteralPath $outDir -Directory -Filter 'multidrive-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -258,21 +283,24 @@ Describe 'MultiDrive' {
         }
         @($runDirs | Select-Object -Unique).Count | Should -Be 2
         foreach ($letter in $driveLetters) {
-            @(Get-ChildItem -LiteralPath $outDir -Directory -Filter "$letter-*").Count | Should -BeGreaterThan 0
+            $runId = if ($script:IsWin) { $letter.TrimEnd(':') } else { 'ROOT' }
+            @(Get-ChildItem -LiteralPath $outDir -Directory -Filter "$runId-*").Count | Should -BeGreaterThan 0
         }
     }
 
     It '-Parallel produces the same two per-drive run dirs' {
-        $driveLetters = @(Get-Volume | Where-Object { $_.DriveType -eq 'Fixed' -and $_.DriveLetter } | Select-Object -First 2 -ExpandProperty DriveLetter)
+        $driveLetters = @(Get-FixedDriveLetters | ForEach-Object {
+            if ($script:IsWin) { ([string]$_).Substring(0, 1).ToUpperInvariant() + ':' } else { $_ }
+        } | Select-Object -First 2)
         if ($driveLetters.Count -lt 2) {
             Set-ItResult -Skipped -Because 'fewer than 2 fixed drives'
             return
         }
-        $drivesArg = (($driveLetters | ForEach-Object { $_.ToString() + ':' }) -join ',')
+        $drivesArg = ($driveLetters -join ',')
         $outDir = Join-Path $script:SuiteRoot 'md-out-par'
         New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outDir -Categories root-temps,root-logs -Parallel | Out-Null
+        & $script:PowerShellExe -NoProfile -ExecutionPolicy Bypass -File $script:ScanDrivePath -Drives $drivesArg -OutDir $outDir -Categories root-temps,root-logs -Parallel | Out-Null
         $LASTEXITCODE | Should -Be 0
 
         $multi = @(Get-ChildItem -LiteralPath $outDir -Directory -Filter 'multidrive-*' | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
@@ -290,7 +318,8 @@ Describe 'MultiDrive' {
         }
         @($runDirs | Select-Object -Unique).Count | Should -Be 2
         foreach ($letter in $driveLetters) {
-            @(Get-ChildItem -LiteralPath $outDir -Directory -Filter "$letter-*").Count | Should -BeGreaterThan 0
+            $runId = if ($script:IsWin) { $letter.TrimEnd(':') } else { 'ROOT' }
+            @(Get-ChildItem -LiteralPath $outDir -Directory -Filter "$runId-*").Count | Should -BeGreaterThan 0
         }
     }
 }

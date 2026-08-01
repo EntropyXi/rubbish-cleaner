@@ -35,10 +35,13 @@ BeforeAll {
     # temp root.
     $script:SuiteRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("rubbish-cleaner-tests\{0}\report" -f $PID)
     $script:VerifyScript = Join-Path $PSScriptRoot '..\..\scripts\verify-report.ps1'
-    $script:DriveLetter = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetTempPath()).TrimEnd('\').TrimEnd(':').ToUpperInvariant()
+    . (Join-Path $PSScriptRoot '..\..\scripts\lib\platform.ps1')
+    $script:TestDrive = if ($script:IsWin) { 'C:' } else { '/' }
+    $script:TestDriveInfo = Resolve-FixedDrive -Drive $script:TestDrive
+    if ($null -eq $script:TestDriveInfo) { throw 'no fixed drive available for report fixture' }
+    $script:DriveLetter = $script:TestDriveInfo.Id
     $script:QuarantineLeaf = 'q-{0}.dat' -f $PID
-    # Same derivation verify-report.ps1 uses: "$env:USERPROFILE\Desktop\.omo\quarantine\<letter>".
-    $script:QuarantineDir = Join-Path (Join-Path $env:USERPROFILE 'Desktop\.omo\quarantine') $script:DriveLetter
+    $script:QuarantineDir = Get-DefaultQuarantineDir -DriveId $script:DriveLetter
 
     $script:RunDir = Join-Path $script:SuiteRoot 'run'
     New-Item -ItemType Directory -Path $script:RunDir -Force | Out-Null
@@ -91,7 +94,7 @@ BeforeAll {
     Set-Content -LiteralPath (Join-Path $script:QuarantineDir $script:QuarantineLeaf) -Value 'quarantined copy'
 
     # ---- run verify-report (read-only apart from <RunDir>\summary.md) -----
-    & $script:VerifyScript -Drive "$($script:DriveLetter):" -RunDir $script:RunDir | Out-Null
+    & $script:VerifyScript -Drive $script:TestDrive -RunDir $script:RunDir | Out-Null
 }
 
 Describe 'verify-report summary' {

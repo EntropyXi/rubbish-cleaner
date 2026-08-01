@@ -9,6 +9,13 @@ description: >
 
 # rubbish-cleaner
 
+## Volume compatibility
+
+- Windows accepts fixed local drive arguments such as `C:`.
+- Linux and macOS accept the filesystem root `/`.
+- Volume capacity is resolved through .NET `DriveInfo`; the skill does not require the Windows-only `Get-Volume` cmdlet.
+- Evidence and quarantine data remain under the Desktop `.omo` directory on Windows and use `$HOME/.omo/` on Linux/macOS.
+
 ![test](https://github.com/EntropyXi/rubbish_cleaning_skill/workflows/test/badge.svg)
 
 [English](SKILL.md) | [简体中文](SKILL_zh.md)
