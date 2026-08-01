@@ -231,6 +231,27 @@ Describe 'PlatformDetection' {
             [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
         }
     }
+
+    It 'normalizes repeated separators without collapsing a runtime temp root' {
+        $oldTemp = [System.Environment]::GetEnvironmentVariable('TEMP', 'Process')
+        $oldTmp = [System.Environment]::GetEnvironmentVariable('TMP', 'Process')
+        $oldTmpDir = [System.Environment]::GetEnvironmentVariable('TMPDIR', 'Process')
+        $repeatedRoot = if ($script:IsWin) { $script:TestDrive + '\\' } else { '///' }
+        $expectedRoot = if ($script:IsWin) { $script:TestDrive + '\' } else { '/' }
+        try {
+            if ($script:IsWin) {
+                [System.Environment]::SetEnvironmentVariable('TEMP', $repeatedRoot, 'Process')
+                [System.Environment]::SetEnvironmentVariable('TMP', $repeatedRoot, 'Process')
+            } else {
+                [System.Environment]::SetEnvironmentVariable('TMPDIR', $repeatedRoot, 'Process')
+            }
+            Get-SystemTempDir | Should -Be $expectedRoot
+        } finally {
+            [System.Environment]::SetEnvironmentVariable('TEMP', $oldTemp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMP', $oldTmp, 'Process')
+            [System.Environment]::SetEnvironmentVariable('TMPDIR', $oldTmpDir, 'Process')
+        }
+    }
 }
 
 Describe 'ScheduleParams' {
