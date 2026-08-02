@@ -99,8 +99,12 @@ def _case_key(value: object) -> str:
 
 def _is_traversal_link(path: Path) -> bool:
     try:
+        # Validate every existing ancestor before looking at the final
+        # component.  A regular-looking final directory may still be reached
+        # through a junction/symlink ancestor and must fail closed.
+        core._assert_no_traversal_components(os.fspath(path))
         return path.is_symlink() or core.is_junction(os.fspath(path))
-    except OSError:
+    except (OSError, ValueError):
         return True
 
 
@@ -192,7 +196,23 @@ def _resume_files(paths: Iterable[Path], category: str, resume_state: Optional[d
     if not last_path:
         return ordered
     threshold = last_path.casefold()
-    return [path for path in ordered if os.fspath(path).casefold() >= threshold]
+    try:
+        last_parent = os.path.normcase(os.path.abspath(os.path.dirname(last_path)))
+    except (OSError, TypeError):
+        last_parent = ""
+    filtered: list[Path] = []
+    for path in ordered:
+        try:
+            parent = os.path.normcase(os.path.abspath(os.fspath(path.parent)))
+        except (OSError, TypeError):
+            parent = ""
+        # A category may enumerate several independent roots (for example
+        # Windows\\Temp then Windows\\Prefetch).  Only apply the ordinal
+        # checkpoint cut to the root that actually produced lastPath; all
+        # other roots are unscanned work and must remain eligible.
+        if parent != last_parent or os.fspath(path).casefold() >= threshold:
+            filtered.append(path)
+    return filtered
 
 
 def _dir_stats(path: Path, context: dict[str, Any], category: str) -> tuple[int, int]:
@@ -235,7 +255,7 @@ def _find_dirs_named(root: Path, name: str) -> list[Path]:
     while stack:
         directory = stack.pop()
         for child in _list_directories(directory):
-            if child.name == name:
+            if child.name.casefold() == name.casefold():
                 found.append(child)
             else:
                 stack.append(child)
@@ -421,7 +441,7 @@ def _scan_ide_caches(context: dict[str, Any]) -> None:
         jetbrains = context["local_app_data"] / "JetBrains"
         for product in _list_directories(jetbrains):
             names = ["caches", "log"]
-            if product.name in {"Toolbox", "Toolbox-Dev"}:
+            if product.name.casefold() in {"toolbox", "toolbox-dev"}:
                 names.extend(["cache", "logs"])
             for name in names:
                 path = product / name
