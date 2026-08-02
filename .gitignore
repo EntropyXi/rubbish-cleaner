@@ -5,6 +5,7 @@
 .omo/notepads/
 .omo/boulder.json
 .codegraph/
+.pytest_cache/
 __pycache__/
 *.pyc
 *.py[cod]

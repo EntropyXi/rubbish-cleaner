@@ -23,6 +23,7 @@ _IGNORE = shutil.ignore_patterns(
     ".git",
     ".omo",
     ".codegraph",
+    ".pytest_cache",
     "__pycache__",
     "*.pyc",
     "*.ps1",
