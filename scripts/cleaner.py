@@ -29,6 +29,30 @@ _VALID_RISKS = {"SAFE", "CAUTION", "ASK", "ELEVATED"}
 _VALID_ACTIONS = {"delete", "quarantine", "ask", "report-only"}
 _TEMP_CATEGORIES = {"root-temps", "user-temp"}
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
+_RISK_ACTION_MAP = {
+    "SAFE": "delete",
+    "CAUTION": "quarantine",
+    "ASK": "ask",
+    "ELEVATED": "report-only",
+}
+_CATEGORY_RISK_MAP = {
+    "root-temps": "SAFE",
+    "root-logs": "SAFE",
+    "duplicate-archives": "ASK",
+    "empty-dirs": "SAFE",
+    "recycle-bin": "ASK",
+    "root-suspicious": "CAUTION",
+    "app-caches": "SAFE",
+    "browser-caches": "SAFE",
+    "gpu-shader": "SAFE",
+    "dev-caches": "SAFE",
+    "ide-caches": "SAFE",
+    "crash-dumps": "SAFE",
+    "thumbnail-cache": "SAFE",
+    "user-temp": "SAFE",
+    "elevated-system": "ELEVATED",
+}
+_CANONICAL_CATEGORY = {category.casefold(): category for category in _CATEGORY_RISK_MAP}
 
 
 def _drive_id(drive: str) -> str:
@@ -89,6 +113,19 @@ def _read_candidates(path: Path) -> list[dict[str, str]]:
                 raise ValueError(f"Malformed candidates.csv row {index + 2}: unknown Risk '{row['Risk']}'")
             if row["Action"] not in _VALID_ACTIONS:
                 raise ValueError(f"Malformed candidates.csv row {index + 2}: unknown Action '{row['Action']}'")
+            canonical_category = _CANONICAL_CATEGORY.get(row["Category"].casefold())
+            if canonical_category is None:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: unknown Category '{row['Category']}'"
+                )
+            expected_risk = _CATEGORY_RISK_MAP[canonical_category]
+            expected_action = _RISK_ACTION_MAP[expected_risk]
+            if row["Risk"] != expected_risk or row["Action"] != expected_action:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                    f"requires Risk '{expected_risk}' and Action '{expected_action}'"
+                )
+            row["Category"] = canonical_category
             try:
                 int(row["SizeBytes"])
                 int(row["FileCount"])
@@ -147,6 +184,15 @@ def _write_checkpoint(path: Path, completed: list[str], last_index: int) -> None
         _write_text_no_follow(path, json.dumps(payload, ensure_ascii=False, indent=2))
     except OSError as error:
         print(f"WARNING: clean checkpoint write failed (continuing): {error}", file=sys.stderr)
+
+
+def _checkpoint_frontier(rows: list[dict[str, str]], completed: list[str]) -> int:
+    """Return the first row not covered by a fully completed category."""
+    completed_keys = {category.casefold() for category in completed}
+    for index, row in enumerate(rows):
+        if row["Category"].casefold() not in completed_keys:
+            return index
+    return len(rows)
 
 
 def _record(
@@ -382,7 +428,14 @@ def _handle_elevated(
 
     try:
         shell_execute(batch_path)
-        _record(csv_path, category, "Elevated", category, "OK")
+        _record(
+            csv_path,
+            category,
+            "Elevated",
+            category,
+            "ELEVATED_LAUNCHED",
+            "ShellExecuteW accepted the batch launch; this does not confirm completion",
+        )
     except (OSError, ValueError) as error:
         _record(csv_path, category, "Elevated", category, "SKIP_ELEVATION_DENIED", str(error))
     return True
@@ -435,7 +488,6 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         if not checkpoint_path.is_file():
             raise ValueError(f"No checkpoint found for resume: {checkpoint_path}")
         resume_state = _read_checkpoint(checkpoint_path)
-    skip_until = int(resume_state["lastCleanedRowIndex"])
     completed = list(resume_state["completedCategories"])
     skipped_categories: list[str] = []
     dispositions: list[dict[str, str]] = []
@@ -445,11 +497,11 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
             skipped_categories.append(category)
             print(f"SKIP: category {category} excluded by -Categories filter")
             continue
-        pending = [(index, row) for index, row in entries if index >= skip_until]
-        if not pending:
+        if category.casefold() in {item.casefold() for item in completed}:
             skipped_categories.append(category)
             print(f"SKIP: category {category} already completed (resume)")
             continue
+        pending = entries
 
         risk = entries[0][1]["Risk"]
         handled = False
@@ -497,8 +549,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         if handled:
             if category not in completed:
                 completed.append(category)
-            group_end = max(index for index, _ in entries) + 1
-            _write_checkpoint(checkpoint_path, completed, group_end)
+            _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
 
     return {
         "drive": drive,
