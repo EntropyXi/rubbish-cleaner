@@ -64,6 +64,8 @@ def _read_text_no_follow(path: Path) -> str:
 
 
 def _windows_close_handle(handle: int) -> None:
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
@@ -74,6 +76,8 @@ def _windows_close_handle(handle: int) -> None:
 
 
 def _windows_final_path(handle: int) -> str:
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
@@ -93,14 +97,25 @@ def _windows_final_path(handle: int) -> str:
 
 
 def _windows_assert_handle_path(handle: int, expected_path: str, message: str) -> None:
-    expected = os.path.normcase(os.path.abspath(os.path.normpath(expected_path)))
-    actual = os.path.normcase(os.path.abspath(os.path.normpath(_windows_final_path(handle))))
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
+    # Compare the two canonical filesystem identities, not their textual
+    # spellings.  The user-supplied expected_path may use 8.3 short names
+    # (e.g. C:\USERS\RUNNER~1\...) while GetFinalPathNameByHandle returns the
+    # long form (C:\Users\runneradmin\...); a lexical comparison of those two
+    # strings raises Errno 10062 even though they name the same directory.
+    # os.path.realpath() on Windows resolves 8.3 short names to their long
+    # equivalents (3.8+), so resolve BOTH sides before the casefolded compare.
+    expected = os.path.normcase(os.path.realpath(expected_path))
+    actual = os.path.normcase(os.path.realpath(_windows_final_path(handle)))
     if actual != expected:
         raise OSError(errno.ELOOP, message, expected_path)
 
 
 def _windows_parent_guard(parent: str) -> int:
     """Open and verify a stable non-reparse directory handle on Windows."""
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
@@ -172,6 +187,8 @@ def _windows_parent_guard(parent: str) -> int:
 
 def _windows_create_temp(parent_handle: int, output_leaf: str, text: str) -> int:
     """Create and write an exclusive temp relative to a stable parent handle."""
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
@@ -299,6 +316,8 @@ def _windows_create_temp(parent_handle: int, output_leaf: str, text: str) -> int
 
 def _windows_rename_relative(source_handle: int, parent_handle: int, destination_leaf: str) -> None:
     """Atomically replace one child entry relative to a stable parent handle."""
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
@@ -352,6 +371,8 @@ def _windows_rename_relative(source_handle: int, parent_handle: int, destination
 
 def _windows_delete_on_close(handle: int) -> None:
     """Mark the exact opened temporary object for deletion on handle close."""
+    if not platform.IS_WINDOWS:
+        raise RuntimeError("Windows-only helper called on non-Windows")
     import ctypes
     from ctypes import wintypes
 
