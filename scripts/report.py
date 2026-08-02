@@ -387,9 +387,23 @@ def _windows_delete_on_close(handle: int) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _windows_capable() -> bool:
+    """True only when this interpreter can call the Win32 handle APIs.
+
+    Keyed on the interpreter's actual ctypes capability rather than the
+    (monkeypatchable) ``platform.IS_WINDOWS`` flag: integration tests simulate
+    a Windows drive layout on POSIX hosts by forcing that flag to True, and on
+    such hosts the atomic-replacement path must fall back to the O_NOFOLLOW
+    write path instead of calling WinDLL.
+    """
+    import ctypes
+
+    return hasattr(ctypes, "WinDLL")
+
+
 def _write_text_no_follow(path: Path, text: str) -> None:
     normalized = core._assert_no_traversal_components(os.fspath(path))
-    if platform.IS_WINDOWS:
+    if platform.IS_WINDOWS and _windows_capable():
         # Windows does not expose O_NOFOLLOW.  Never truncating-open the final
         # output entry: write an exclusive sibling, re-audit the destination,
         # then replace its directory entry atomically.  A symlink/reparse race
