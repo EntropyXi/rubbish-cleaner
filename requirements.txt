@@ -1,4 +1,7 @@
-# rubbish-cleaner - dependency manifest
-# No Python runtime dependencies: the skill is Windows PowerShell 5.1 (built-in).
-# Optional dev dependency for tests (auto-detected; skipped when absent):
-#   Install-Module Pester -Scope CurrentUser -Force -MinimumVersion 5.0
+# rubbish-cleaner — Python 3.10+
+# Required:
+psutil>=5.9
+# Optional (Windows-only):
+pywin32>=306; sys_platform == "win32"  # Task Scheduler, UAC, event log (Windows only)
+# Dev:
+pytest>=8

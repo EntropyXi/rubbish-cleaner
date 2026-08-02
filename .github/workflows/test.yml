@@ -1,52 +1,95 @@
 name: test
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-      fail-fast: false
+        python-version: ['3.10', '3.11', '3.12']
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Pester 5
-        shell: pwsh
-        run: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -SkipPublisherCheck -Force
-      - name: Parse-check all scripts
-        shell: pwsh
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: bash
         run: |
-          $fail = 0
-          Get-ChildItem -Recurse -Path scripts,tests -Filter '*.ps1' | ForEach-Object {
-            $tokens = $null; $errors = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
-            if ($errors.Count -gt 0) { $fail++; Write-Host "PARSE FAIL: $($_.FullName)" }
-            else { Write-Host "PARSE PASS: $($_.FullName)" }
-          }
-          Write-Host "PARSE CHECK: $fail file(s) with errors"
-          if ($fail -gt 0) { throw "$fail file(s) with parse errors" }
-      - name: PS 5.1 compatibility grep (pwsh-7-only syntax)
-        shell: pwsh
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile Python sources
+        shell: bash
+        run: python -m compileall -q scripts tests
+
+      - name: Python 3.10 compatibility lint
+        shell: bash
         run: |
-          $forbidden = @('\?\?', '\|\|', '&&', '-AsHashtable', 'ForEach-Object\s+-Parallel')
-          # Two files are EXCLUDED from this scan:
-          # - scripts/lib/rubbish-core.ps1: Invoke-ParallelForEach legitimately uses
-          #   ForEach-Object -Parallel inside the pwsh-7 guard ($script:IsCoreCLR)
-          # - scripts/schedule.ps1: its CronLine string literal contains '&&' as DATA
-          #   (cron command chaining), not pwsh-7 operator syntax -> false positive
-          # The list below is the 4 PS 5.1-pure scripts that must stay clean.
-          $hits = Select-String -Path scripts\scan-drive.ps1,scripts\clean-drive.ps1,scripts\verify-report.ps1,scripts\install.ps1 -Pattern ($forbidden -join '|') -AllMatches
-          if ($hits) { Write-Host "FORBIDDEN SYNTAX FOUND:"; $hits | ForEach-Object { Write-Host "$_" }; throw "PS 5.1 incompatible syntax detected" }
-          else { Write-Host "PS 5.1 COMPATIBILITY: PASS" }
-      - name: Run Pester 5 unit tests
-        shell: pwsh
+          python - <<'PY'
+          import ast
+          import pathlib
+          import sys
+
+          forbidden_imports = {"tomllib", "zoneinfo", "graphlib"}
+          failures = []
+          for path in [p for root in (pathlib.Path("scripts"), pathlib.Path("tests")) for p in root.rglob("*.py")]:
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              annotation_ids = set()
+              for parent in ast.walk(tree):
+                  annotation = None
+                  if isinstance(parent, ast.arg):
+                      annotation = parent.annotation
+                  elif isinstance(parent, ast.AnnAssign):
+                      annotation = parent.annotation
+                  elif isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                      annotation = parent.returns
+                  if annotation is not None:
+                      annotation_ids.update(id(node) for node in ast.walk(annotation))
+              if any(isinstance(node, getattr(ast, "Match", ())) for node in ast.walk(tree)):
+                  failures.append((str(path), "match statement"))
+              if any(isinstance(node, ast.NamedExpr) for node in ast.walk(tree)):
+                  failures.append((str(path), "walrus operator"))
+              if any(isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr) and id(node) in annotation_ids for node in ast.walk(tree)):
+                  failures.append((str(path), "union/bitwise-or operator"))
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      modules = [alias.name.split(".", 1)[0] for alias in node.names]
+                  elif isinstance(node, ast.ImportFrom):
+                      modules = [node.module.split(".", 1)[0]] if node.module else []
+                  else:
+                      continue
+                  for module in modules:
+                      if module in forbidden_imports:
+                          failures.append((str(path), "3.11+ import: " + module))
+          if failures:
+              print("compatibility lint: FAIL")
+              for item in failures:
+                  print(item)
+              sys.exit(1)
+          print("compatibility lint: PASS")
+          PY
+
+      - name: Run pytest suite
+        shell: bash
+        run: python -m pytest tests/ -x --tb=short
+
+      - name: Scanner integration smoke (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
-          $result = Invoke-Pester -Path tests/unit -PassThru -Output Detailed
-          Write-Host "PESTER CHECK: result=$($result.Result), $($result.PassedCount) passed, $($result.FailedCount) failed, $($result.SkippedCount) skipped, $($result.FailedBlocksCount) failed blocks, $($result.FailedContainersCount) failed containers"
-          if ($result.Result -ne 'Passed') { throw "Pester run failed: $($result.Result)" }
-      - name: Run zero-dependency sandbox harness
-        shell: pwsh
-        run: ./tests/sandbox/run-sandbox-tests.ps1
-      - name: Run full test entry point on Windows PowerShell 5.1
-        if: matrix.os == 'windows-latest'
-        shell: powershell
-        run: .\tests\run-tests.ps1
+          python scripts/scanner.py -Drive 'D:' -Categories root-temps,root-logs
+
+      - name: Scanner integration smoke (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python scripts/scanner.py -Drive / -Categories root-temps,root-logs

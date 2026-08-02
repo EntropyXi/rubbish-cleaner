@@ -32,19 +32,20 @@ dll/exe 等）分类列出，经用户批准后**安全**清理，并产出验�
   相对路径脚本调用和 `agents/openai.yaml`（允许隐式调用 `$rubbish-cleaner`）获得支持
 - **opencode**：`~/.config/opencode/skills/automation/rubbish-cleaner/`
 
-**可移植调用规则**：脚本内部通过 `$PSScriptRoot` 定位 `scripts\lib\rubbish-core.ps1`，
+**可移植调用规则**：脚本通过 Python 模块路径定位自身资源，
 因此**从 skill 根目录运行，或使用绝对路径运行**均可，与当前工作目录无关：
 
-```powershell
+```bash
 cd <skill-root>
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\scan-drive.ps1 -Drive X:
+python -m pip install -r requirements.txt
+python scripts/scanner.py -Drive X: -Categories root-temps,root-logs
 ```
 
 ## 平台支持
 
-- **Windows**：PowerShell 5.1（系统自带）与 pwsh 7 均支持。
-- **Linux / macOS**：需要 pwsh 7（PowerShell Core）——脚本不依赖 Windows 专属 cmdlet。
-- **PS 5.1 专属特性仅限 Windows**：`elevated-system`（UAC 提升清理，`-Yes` + 系统盘）
+- **三平台**：需要 Python 3.10+ 与 `psutil`。
+- **Windows 专属依赖**：`pywin32` 仅在 Windows 安装，用于 Task Scheduler 和 UAC。
+- **Windows 专属特性**：`elevated-system`（UAC 提升清理，`-Yes` + 系统盘）
   依赖 Windows UAC，在 Linux/macOS 上不弹提升框，直接记 `SKIP_ELEVATION_DENIED`
   并**静默跳过**，其余清理照常进行。
 
@@ -56,7 +57,7 @@ drive cleanup、cache cleanup、clean temp files 时触发。扫描为只读（�
 
 ## 3. 铁律（5 条，完整护栏见 [safety-rules.md](references/safety-rules.md)）
 
-1. **只删扫描结果**：clean-drive.ps1 只处理 candidates.csv 列出的行，CSV 之外一律不碰。
+1. **只删扫描结果**：cleaner.py 只处理 candidates.csv 列出的行，CSV 之外一律不碰。
 2. **-LiteralPath + junction 感知**：绝不用裸 `-Path`/裸 `-Recurse`（PS 5.1 的
    `-Recurse` 会跟随 NTFS junction）。
 3. **遵循文件系统锁语义**：Windows 报告为锁定的文件记 `SKIP_LOCKED`；POSIX 允许 unlink 打开中的文件。任何平台都不强杀进程。
@@ -67,35 +68,35 @@ drive cleanup、cache cleanup、clean temp files 时触发。扫描为只读（�
 
 预检 → 扫描 → 展示分类列表 → 用户批准 → 清理 → 验证 → 交付报告。
 
-```powershell
+```bash
 # 1) 预检（可选）：确认目标盘为固定本地卷、确认占用进程
 # 2) 扫描（只读，绝不删除）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\scan-drive.ps1 -Drive X:
+python scripts/scanner.py -Drive X: -Categories root-temps,root-logs
 # 3) 向用户展示分类列表（数量 + 总字节数），逐项征得批准
 # 4) 用户批准后清理（-Yes = 批准 ASK 分类 + 不逐类询问）
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\clean-drive.ps1 -Drive X: -Yes
+python scripts/cleaner.py -Drive X: -Yes
 #    或按分类交互式清理：不带 -Yes，脚本逐类 Read-Host 询问 y/n
 # 5) 生成验证报告
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-report.ps1 -Drive X: -RunDir <run>
+python scripts/report.py -Drive X: -RunDir <run>
 # 6) 把 <run>\summary.md 交给用户
 ```
 
 要点（全部以 `<run>` = `<OutDir>\<盘符>-<时间戳>` 为运行目录，例如 `X-20260731-210209`）：
 
 - **首次扫描后先展示，再清理**：把 scan 输出的分类列表（大小/数量）呈现给用户，
-  获得批准后才带 `-Yes` 运行 clean-drive.ps1。绝不未经批准就 `-Yes`。
-- 不传 `-RunDir` 时 verify-report.ps1 自动取该盘最新的运行目录。
+  获得批准后才带 `-Yes` 运行 cleaner.py。绝不未经批准就 `-Yes`。
+- 不传 `-RunDir` 时 report.py 自动取该盘最新的运行目录。
 - `-Categories root-temps,root-logs` 可过滤分类；`-Categories` 接受逗号分隔字符串。
-- `-SkipElevated`：只把 elevated.ps1 写入运行目录，**不弹 UAC**（测试/CI 安全）。
+- `-SkipElevated`：只把 elevated 批处理写入运行目录，**不弹 UAC**（测试/CI 安全）。
 - elevated-system 仅当用户盘 + `-Yes` 且在**系统盘**上才真正弹 UAC；拒绝即跳过并继续。
 - 未带 `-Yes` 时 ASK 分类（duplicate-archives、recycle-bin）整类跳过。
 - **多盘批量**：`-Drives C:,D:` 一次扫描/清理多个盘，各盘独立运行目录，
   **顺序执行**（`-Parallel` 为安全考虑被忽略）。
 - **断点续扫/续清**：`-Resume` 从该盘运行目录里的 checkpoint 继续，已完成分类
   不会重复处理（clean 侧跳过已清理行，scan 侧保留已有候选）。
-- **定时清理**：`scripts\schedule.ps1` 提供任务计划程序集成
-  （`-Action Register -Drive C: -Policy safe -Time 02:00`、`-Action List`、
-  `-Action Unregister`，支持安全/激进策略档）。
+- **定时清理**：`python scripts/schedule.py` 提供任务计划程序集成
+  （`register --drive C: --policy safe --time 02:00`、`list`、
+  `unregister --drive C:`，支持安全/激进策略档）。
 
 ## 5. 分类与风险
 
@@ -111,11 +112,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-report.ps1 -D
 
 ## 6. 证据与报告位置
 
-- 运行目录：`$env:USERPROFILE\Desktop\.omo\evidence\rubbish-cleaner\<盘符>-<时间戳>\`
+- 运行目录：Windows 为桌面 `.omo\evidence\rubbish-cleaner\<盘符>-<时间戳>\`，Linux/macOS 为 `$HOME/.omo/evidence/rubbish-cleaner/`
   - `preflight.txt`（基线空闲字节）、`candidates.csv`（候选）、`scan-report.json`（分类报告）
   - `cleanup-errors.csv`（清理处置 CSV）、`summary.md`（验证报告，8 个 `##` 节）
-  - elevated 运行时：`elevated.ps1` + `elevated-result.txt`
-- 隔离目录：`$env:USERPROFILE\Desktop\.omo\quarantine\<盘符>\`（可恢复）
+  - elevated 运行时：`elevated` 批处理 + `elevated-result.txt`
+- 隔离目录：对应 `.omo/quarantine/<盘符>/`（可恢复）
 
 ## 7. MUST NOT 清单（红线）
 
@@ -130,12 +131,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify-report.ps1 -D
 
 双模式入口（详见 `tests/`）：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+```bash
+python tests/test_runner.py
 ```
 
-- 系统存在 **Pester 5.x** → 运行 Pester 套件（`tests\unit\`）。
-- 否则（本机 PS 5.1 自带 Pester 3.4）→ 回退到**零依赖 sandbox 套件**
-  （`tests\sandbox\`，纯 PowerShell 断言）。
-- 两套测试都在 `$env:TEMP` 下构建 fake tree，只触碰测试自己的临时根目录，
+- 系统存在 **pytest** → 运行六个 Python 套件；否则回退到 `test_runner.py` 的零依赖断言模式。
+- 测试在临时目录下构建 fake tree，只触碰测试自己的临时根目录，
   **绝不接触真实数据**；exit 0 = 全部通过。

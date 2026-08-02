@@ -1,0 +1,642 @@
+"""Approval-gated, sequential cleanup of scanner candidate rows."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import subprocess
+import sys
+from collections import OrderedDict
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Optional
+
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts.lib import core, platform
+
+
+IS_WINDOWS = platform.IS_WINDOWS
+
+_CANDIDATE_COLUMNS = ("Category", "Risk", "Path", "SizeBytes", "FileCount", "Action")
+_CLEANUP_HEADER = "Timestamp|Phase|Action|Path|ErrorMessage|Disposition\n"
+_VALID_RISKS = {"SAFE", "CAUTION", "ASK", "ELEVATED"}
+_VALID_ACTIONS = {"delete", "quarantine", "ask", "report-only"}
+_TEMP_CATEGORIES = {"root-temps", "user-temp"}
+_DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
+_RISK_ACTION_MAP = {
+    "SAFE": "delete",
+    "CAUTION": "quarantine",
+    "ASK": "ask",
+    "ELEVATED": "report-only",
+}
+_CATEGORY_RISK_MAP = {
+    "root-temps": "SAFE",
+    "root-logs": "SAFE",
+    "duplicate-archives": "ASK",
+    "empty-dirs": "SAFE",
+    "recycle-bin": "ASK",
+    "root-suspicious": "CAUTION",
+    "app-caches": "SAFE",
+    "browser-caches": "SAFE",
+    "gpu-shader": "SAFE",
+    "dev-caches": "SAFE",
+    "ide-caches": "SAFE",
+    "crash-dumps": "SAFE",
+    "thumbnail-cache": "SAFE",
+    "user-temp": "SAFE",
+    "elevated-system": "ELEVATED",
+}
+_CANONICAL_CATEGORY = {category.casefold(): category for category in _CATEGORY_RISK_MAP}
+
+
+def _drive_id(drive: str) -> str:
+    if IS_WINDOWS:
+        return drive.rstrip("\\/").rstrip(":").upper()
+    return "ROOT"
+
+
+def _split_values(values: object) -> list[str]:
+    if values is None:
+        return []
+    source = values if isinstance(values, (list, tuple, set)) else [values]
+    result: list[str] = []
+    for value in source:
+        result.extend(part.strip() for part in str(value).split(",") if part.strip())
+    return result
+
+
+def _write_text_no_follow(path: Path, text: str) -> None:
+    """Write one output file while rejecting linked path components."""
+    normalized = Path(core._assert_no_traversal_components(os.fspath(path)))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(normalized, flags, 0o666)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+        stream.write(text)
+
+
+def _ensure_cleanup_csv(path: Path) -> None:
+    normalized = core._assert_no_traversal_components(os.fspath(path))
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(normalized, flags, 0o666)
+    with os.fdopen(descriptor, "a", encoding="utf-8", newline="") as stream:
+        if os.fstat(stream.fileno()).st_size == 0:
+            stream.write(_CLEANUP_HEADER)
+
+
+def _read_candidates(path: Path) -> list[dict[str, str]]:
+    normalized = core._assert_no_traversal_components(os.fspath(path))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(normalized, flags)
+    with os.fdopen(descriptor, "r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="|")
+        if tuple(reader.fieldnames or ()) != _CANDIDATE_COLUMNS:
+            actual = "|".join(reader.fieldnames or ())
+            raise ValueError(
+                f"Unexpected candidates.csv header: '{actual}'. Expected: {'|'.join(_CANDIDATE_COLUMNS)}"
+            )
+        rows: list[dict[str, str]] = []
+        for index, source in enumerate(reader):
+            if None in source:
+                raise ValueError(f"Malformed candidates.csv row {index + 2}: too many columns")
+            row = {column: str(source.get(column, "")) for column in _CANDIDATE_COLUMNS}
+            if not row["Category"] or not row["Path"]:
+                raise ValueError(f"Malformed candidates.csv row {index + 2}: Category and Path are required")
+            row["Risk"] = row["Risk"].upper()
+            row["Action"] = row["Action"].lower()
+            if row["Risk"] not in _VALID_RISKS:
+                raise ValueError(f"Malformed candidates.csv row {index + 2}: unknown Risk '{row['Risk']}'")
+            if row["Action"] not in _VALID_ACTIONS:
+                raise ValueError(f"Malformed candidates.csv row {index + 2}: unknown Action '{row['Action']}'")
+            canonical_category = _CANONICAL_CATEGORY.get(row["Category"].casefold())
+            if canonical_category is None:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: unknown Category '{row['Category']}'"
+                )
+            expected_risk = _CATEGORY_RISK_MAP[canonical_category]
+            expected_action = _RISK_ACTION_MAP[expected_risk]
+            if row["Risk"] != expected_risk or row["Action"] != expected_action:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                    f"requires Risk '{expected_risk}' and Action '{expected_action}'"
+                )
+            row["Category"] = canonical_category
+            try:
+                int(row["SizeBytes"])
+                int(row["FileCount"])
+            except ValueError as error:
+                raise ValueError(f"Malformed candidates.csv row {index + 2}: invalid numeric field") from error
+            rows.append(row)
+    return rows
+
+
+def _group_rows(rows: list[dict[str, str]]) -> OrderedDict[str, list[tuple[int, dict[str, str]]]]:
+    groups: OrderedDict[str, list[tuple[int, dict[str, str]]]] = OrderedDict()
+    for index, row in enumerate(rows):
+        groups.setdefault(row["Category"], []).append((index, row))
+    for category, entries in groups.items():
+        risks = {row["Risk"] for _, row in entries}
+        if len(risks) != 1:
+            raise ValueError(f"Category '{category}' has inconsistent Risk values")
+    return groups
+
+
+def _latest_candidates(out_dir: Path, drive: str) -> Path:
+    prefix = f"{_drive_id(drive)}-"
+    candidates = [
+        directory / "candidates.csv"
+        for directory in out_dir.iterdir()
+        if directory.is_dir()
+        and directory.name.startswith(prefix)
+        and (directory / "candidates.csv").is_file()
+    ] if out_dir.is_dir() else []
+    if not candidates:
+        raise ValueError(f"No candidates.csv found under '{out_dir}' for drive '{drive}'")
+    return max(candidates, key=lambda path: path.parent.stat().st_mtime_ns)
+
+
+def _read_checkpoint(path: Path) -> dict[str, Any]:
+    normalized = core._assert_no_traversal_components(os.fspath(path))
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(normalized, flags)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+        data = json.load(stream)
+    last_index = int(data.get("lastCleanedRowIndex", -1))
+    if last_index < -1:
+        raise ValueError("clean checkpoint lastCleanedRowIndex must be >= -1")
+    return {
+        "completedCategories": [str(item) for item in data.get("completedCategories", [])],
+        "lastCleanedRowIndex": last_index,
+    }
+
+
+def _write_checkpoint(path: Path, completed: list[str], last_index: int) -> None:
+    payload = {
+        "completedCategories": completed,
+        "lastCleanedRowIndex": int(last_index),
+    }
+    try:
+        _write_text_no_follow(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    except OSError as error:
+        print(f"WARNING: clean checkpoint write failed (continuing): {error}", file=sys.stderr)
+
+
+def _checkpoint_frontier(rows: list[dict[str, str]], completed: list[str]) -> int:
+    """Return the first row not covered by a fully completed category."""
+    completed_keys = {category.casefold() for category in completed}
+    for index, row in enumerate(rows):
+        if row["Category"].casefold() not in completed_keys:
+            return index
+    return len(rows)
+
+
+def _record(
+    csv_path: Path,
+    category: str,
+    action: str,
+    path: object,
+    disposition: str,
+    message: str = "",
+) -> str:
+    core.write_cleanup_csv(
+        os.fspath(csv_path),
+        {
+            "Phase": category,
+            "Action": action,
+            "Path": os.fspath(path),
+            "ErrorMessage": message,
+            "Disposition": disposition,
+        },
+    )
+    return disposition
+
+
+def _has_traversal_link(path: str) -> bool:
+    try:
+        core._assert_no_traversal_components(path)
+        return False
+    except (OSError, ValueError):
+        return True
+
+
+def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_dir: Path) -> str:
+    target = row["Path"]
+    action = row["Action"]
+    if _has_traversal_link(target):
+        return _record(
+            csv_path,
+            category,
+            "Quarantine" if action == "quarantine" else "Remove",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
+
+    if action == "quarantine":
+        return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
+    if action not in {"delete", "ask"}:
+        print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
+        return "SKIP_REPORT_ONLY"
+
+    if os.path.isdir(target):
+        if not core.is_dir_empty(target):
+            return _record(
+                csv_path,
+                category,
+                "Remove",
+                target,
+                "SKIP_NOT_EMPTY",
+                "re-verify failed: directory is not empty",
+            )
+    elif os.path.isfile(target):
+        if category in _TEMP_CATEGORIES:
+            try:
+                too_recent = datetime.now().timestamp() - os.stat(target, follow_symlinks=False).st_mtime < timedelta(days=7).total_seconds()
+            except OSError:
+                too_recent = False
+            if too_recent:
+                return _record(
+                    csv_path,
+                    category,
+                    "Remove",
+                    target,
+                    "SKIP_TOO_RECENT",
+                    "re-verify failed: last write is within the 7-day window",
+                )
+        if core.test_file_locked(target):
+            return _record(
+                csv_path,
+                category,
+                "Remove",
+                target,
+                "SKIP_LOCKED",
+                "re-verify failed: file is locked",
+            )
+
+    if _has_traversal_link(target):
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
+    return core.safe_remove(target, category, os.fspath(csv_path))
+
+
+def _approval_from_mapping(approvals: object, category: str) -> Optional[bool]:
+    if approvals is None:
+        return None
+    if callable(approvals):
+        return bool(approvals(category))
+    if isinstance(approvals, Mapping):
+        for key, value in approvals.items():
+            if str(key).casefold() == category.casefold():
+                return bool(value)
+        return None
+    approved = {value.casefold() for value in _split_values(approvals)}
+    return True if category.casefold() in approved else None
+
+
+def _category_approved(
+    category: str,
+    risk: str,
+    entries: list[tuple[int, dict[str, str]]],
+    *,
+    yes: bool,
+    approvals: object,
+    input_func: Callable[[str], str],
+) -> bool:
+    if yes:
+        return True
+    explicit = _approval_from_mapping(approvals, category)
+    if explicit is not None:
+        return explicit
+    if risk == "ASK":
+        return False
+    total = sum(int(row["SizeBytes"]) for _, row in entries)
+    print(f"SUMMARY: category {category} - {len(entries)} item(s), {total} byte(s)")
+    try:
+        answer = input_func(f"Clean category {category}? (y/n)")
+    except EOFError:
+        return False
+    return answer.strip().lower().startswith("y")
+
+
+def _elevated_batch_text(drive: str) -> str:
+    drive_root = drive.rstrip("\\/")
+    windows_root = f"{drive_root}\\Windows"
+    return "\r\n".join(
+        [
+            "@echo off",
+            "setlocal",
+            "net stop wuauserv",
+            "dism.exe /online /cleanup-image /startcomponentcleanup",
+            f'del /f /q "{windows_root}\\Temp\\*"',
+            f'del /f /q "{windows_root}\\Prefetch\\*.pf"',
+            "exit /b 0",
+            "",
+        ]
+    )
+
+
+def _shell_execute_elevated(batch_path: Path) -> int:
+    if not IS_WINDOWS:
+        raise OSError("UAC elevation is unavailable on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    shell_execute = ctypes.WinDLL("shell32", use_last_error=True).ShellExecuteW
+    shell_execute.argtypes = (
+        wintypes.HWND,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+    )
+    shell_execute.restype = wintypes.HINSTANCE
+    result = shell_execute(
+        None,
+        "runas",
+        "cmd.exe",
+        f'/c ""{batch_path}""',
+        os.fspath(batch_path.parent),
+        0,
+    )
+    code = int(result)
+    if code <= 32:
+        raise OSError(code, "ShellExecuteW could not launch the elevated batch")
+    return code
+
+
+def _handle_elevated(
+    category: str,
+    *,
+    drive: str,
+    run_dir: Path,
+    csv_path: Path,
+    yes: bool,
+    skip_elevated: bool,
+    is_user_drive: bool,
+    is_system_drive: bool,
+    shell_execute: Callable[[Path], object],
+) -> bool:
+    if not (yes or skip_elevated):
+        print(f"SKIP: category {category} requires -Yes or -SkipElevated")
+        return False
+    if not IS_WINDOWS:
+        _record(
+            csv_path,
+            category,
+            "Elevated",
+            category,
+            "SKIP_ELEVATION_DENIED",
+            "elevated cleanup is unavailable on POSIX",
+        )
+        return True
+    if not is_user_drive or not is_system_drive:
+        _record(
+            csv_path,
+            category,
+            "Elevated",
+            category,
+            "SKIP_ELEVATION_DENIED",
+            f"refusing elevated cleanup: {drive} is not the user-profile system drive",
+        )
+        return True
+
+    batch_path = run_dir / "elevated.bat"
+    _write_text_no_follow(batch_path, _elevated_batch_text(drive))
+    print(f"PREPARED: elevated batch written to {batch_path}")
+    if skip_elevated:
+        _record(
+            csv_path,
+            category,
+            "Elevated",
+            category,
+            "SKIP_ELEVATION_DENIED",
+            "elevated batch prepared but not launched (-SkipElevated)",
+        )
+        return True
+
+    try:
+        shell_execute(batch_path)
+        _record(
+            csv_path,
+            category,
+            "Elevated",
+            category,
+            "ELEVATED_LAUNCHED",
+            "ShellExecuteW accepted the batch launch; this does not confirm completion",
+        )
+    except (OSError, ValueError) as error:
+        _record(csv_path, category, "Elevated", category, "SKIP_ELEVATION_DENIED", str(error))
+    return True
+
+
+def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
+    """Clean one fixed drive's candidates after category-level approval."""
+    volume = kwargs.get("volume")
+    if volume is None:
+        volume = platform.resolve_fixed_drive(drive)
+        if volume is None:
+            raise ValueError(f"Drive '{drive}' is not an available fixed local volume")
+
+    out_dir = Path(kwargs.get("out_dir") or _DEFAULT_OUT_DIR)
+    candidate_value = kwargs.get("candidates_csv")
+    candidates_path = Path(candidate_value) if candidate_value is not None else _latest_candidates(out_dir, drive)
+    if not candidates_path.is_file():
+        raise ValueError(f"Candidates CSV not found: {candidates_path}")
+    rows = _read_candidates(candidates_path)
+    groups = _group_rows(rows)
+    run_dir = candidates_path.parent
+    cleanup_csv = run_dir / "cleanup-errors.csv"
+    checkpoint_path = run_dir / "clean-checkpoint.json"
+    _ensure_cleanup_csv(cleanup_csv)
+
+    yes = bool(kwargs.get("yes", False))
+    skip_elevated = bool(kwargs.get("skip_elevated", False))
+    resume = bool(kwargs.get("resume", False))
+    categories = {item.casefold() for item in _split_values(kwargs.get("categories"))}
+    approvals = kwargs.get("approvals")
+    input_func = kwargs.get("input_func", input)
+    shell_execute = kwargs.get("shell_execute", _shell_execute_elevated)
+
+    if "is_user_drive" in kwargs:
+        is_user_drive = bool(kwargs["is_user_drive"])
+    elif IS_WINDOWS:
+        is_user_drive = Path.home().drive.casefold() == drive.rstrip("\\/").casefold()
+    else:
+        is_user_drive = drive == "/"
+    if "is_system_drive" in kwargs:
+        is_system_drive = bool(kwargs["is_system_drive"])
+    elif IS_WINDOWS:
+        system_drive = os.environ.get("SystemDrive") or Path(os.environ.get("SystemRoot", "")).drive
+        is_system_drive = bool(system_drive) and system_drive.rstrip("\\/").casefold() == drive.rstrip("\\/").casefold()
+    else:
+        is_system_drive = False
+
+    resume_state = {"completedCategories": [], "lastCleanedRowIndex": -1}
+    if resume:
+        if not checkpoint_path.is_file():
+            raise ValueError(f"No checkpoint found for resume: {checkpoint_path}")
+        resume_state = _read_checkpoint(checkpoint_path)
+    completed = list(resume_state["completedCategories"])
+    skipped_categories: list[str] = []
+    dispositions: list[dict[str, str]] = []
+
+    for category, entries in groups.items():
+        if categories and category.casefold() not in categories:
+            skipped_categories.append(category)
+            print(f"SKIP: category {category} excluded by -Categories filter")
+            continue
+        if category.casefold() in {item.casefold() for item in completed}:
+            skipped_categories.append(category)
+            print(f"SKIP: category {category} already completed (resume)")
+            continue
+        pending = entries
+
+        risk = entries[0][1]["Risk"]
+        handled = False
+        if risk == "ELEVATED":
+            handled = _handle_elevated(
+                category,
+                drive=drive,
+                run_dir=run_dir,
+                csv_path=cleanup_csv,
+                yes=yes,
+                skip_elevated=skip_elevated,
+                is_user_drive=is_user_drive,
+                is_system_drive=is_system_drive,
+                shell_execute=shell_execute,
+            )
+        else:
+            approved = _category_approved(
+                category,
+                risk,
+                pending,
+                yes=yes,
+                approvals=approvals,
+                input_func=input_func,
+            )
+            if not approved:
+                skipped_categories.append(category)
+                if risk == "ASK":
+                    print(f"SKIP: category {category} requires -Yes or explicit approval")
+                else:
+                    print(f"SKIP: category {category} declined by user")
+                continue
+            print(f"CLEAN: category {category} ({risk})")
+            for _, row in pending:
+                quarantine_value = kwargs.get("quarantine_dir")
+                default_quarantine = Path.home() / "Desktop" / ".omo" / "quarantine" / _drive_id(drive)
+                disposition = _process_row(
+                    row,
+                    category,
+                    cleanup_csv,
+                    Path(quarantine_value or default_quarantine),
+                )
+                dispositions.append({"Category": category, "Path": row["Path"], "Disposition": disposition})
+            handled = True
+
+        if handled:
+            if category not in completed:
+                completed.append(category)
+            _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
+
+    return {
+        "drive": drive,
+        "run_dir": os.fspath(run_dir),
+        "candidates_csv": os.fspath(candidates_path),
+        "cleanup_csv": os.fspath(cleanup_csv),
+        "checkpoint": os.fspath(checkpoint_path),
+        "completed_categories": completed,
+        "skipped_categories": skipped_categories,
+        "dispositions": dispositions,
+    }
+
+
+def _subprocess_args(drive: str, arguments: argparse.Namespace) -> list[str]:
+    command = [sys.executable, os.fspath(Path(__file__).resolve()), "-Drive", drive]
+    if arguments.OutDir:
+        command.extend(["-OutDir", arguments.OutDir])
+    if arguments.QuarantineDir:
+        command.extend(["-QuarantineDir", arguments.QuarantineDir])
+    if arguments.Yes:
+        command.append("-Yes")
+    if arguments.SkipElevated:
+        command.append("-SkipElevated")
+    if arguments.Resume:
+        command.append("-Resume")
+    if arguments.Categories:
+        command.extend(["-Categories", ",".join(_split_values(arguments.Categories))])
+    return command
+
+
+def _run_many(drives: list[str], arguments: argparse.Namespace) -> int:
+    if arguments.CandidatesCsv:
+        raise ValueError("-CandidatesCsv cannot be shared across -Drives; use per-drive output directories")
+    failed = False
+    for drive in drives:
+        print(f"[CLEAN START {drive}] {datetime.now().astimezone().isoformat()}", flush=True)
+        completed = subprocess.run(_subprocess_args(drive, arguments), check=False)
+        print(
+            f"[CLEAN END {drive}] {datetime.now().astimezone().isoformat()}",
+            flush=True,
+        )
+        failed = failed or completed.returncode != 0
+    return 1 if failed else 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__, prefix_chars="-")
+    parser.add_argument("-Drive")
+    parser.add_argument("-Drives", nargs="+")
+    parser.add_argument("-CandidatesCsv")
+    parser.add_argument("-OutDir")
+    parser.add_argument("-QuarantineDir")
+    parser.add_argument("-Yes", action="store_true")
+    parser.add_argument("-Categories", nargs="+")
+    parser.add_argument("-SkipElevated", action="store_true")
+    parser.add_argument("-Resume", action="store_true")
+    parser.add_argument("-Parallel", action="store_true")
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = _build_parser()
+    arguments = parser.parse_args(argv)
+    drives = _split_values(arguments.Drives)
+    if bool(arguments.Drive) == bool(drives):
+        parser.error("specify exactly one of -Drive or -Drives")
+    if arguments.Parallel:
+        print("parallel clean is disabled for safety - cleaning drives sequentially")
+    try:
+        if drives:
+            return _run_many(drives, arguments)
+        result = clean(
+            arguments.Drive,
+            candidates_csv=arguments.CandidatesCsv,
+            out_dir=arguments.OutDir,
+            quarantine_dir=arguments.QuarantineDir,
+            yes=arguments.Yes,
+            categories=arguments.Categories,
+            skip_elevated=arguments.SkipElevated,
+            resume=arguments.Resume,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 1
+    print(f"CLEAN COMPLETE: cleanup CSV at {result['cleanup_csv']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
