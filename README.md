@@ -27,15 +27,16 @@ This is a skill for LLM agents, not a traditional CLI tool. You describe what to
 /rubbish-cleaner Clean up drive D: - temp files and caches only, do NOT touch my installers or game saves
 ```
 
-The agent reads [SKILL.md](SKILL.md) and deploys the skill itself, running `scripts\install.ps1` if it is not yet installed (no manual steps needed). It then follows the built-in scan → approve → clean → verify → report flow, shows you the candidate list, and asks for your confirmation before deleting anything.
+The agent reads [SKILL.md](SKILL.md) and deploys the skill itself, running `python scripts/install.py` if it is not yet installed (no manual steps needed). It then follows the built-in scan → approve → clean → verify → report flow, shows you the candidate list, and asks for your confirmation before deleting anything.
 
 **Way 2: manual install (optional).** One command, no admin needed, idempotent:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\install.ps1
+```bash
+python -m pip install -r requirements.txt
+python scripts/install.py --target all
 ```
 
-`-Target all|claude|codex|opencode` selects the platform (default `all`). It installs to `%USERPROFILE%\.claude\skills\rubbish-cleaner\`, `%USERPROFILE%\.codex\skills\rubbish-cleaner\` and `%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\`.
+`--target all|claude|codex|opencode` selects the platform (default `all`). It installs to the corresponding Claude Code, Codex, and opencode skill directories under the current user's home directory.
 
 ## Use it with your agent
 
@@ -69,55 +70,48 @@ rubbish-cleaner/
 ├── SKILL.md                            # Skill core (progressive disclosure)
 ├── README.md / README_zh.md            # EN/ZH docs (this file)
 ├── LICENSE                             # MIT
-├── requirements.txt                    # Dependency note (no third-party runtime deps)
+├── requirements.txt                    # psutil plus Windows-only pywin32
 ├── agents/
 │   └── openai.yaml                     # Codex UI metadata; ignored by Claude Code
 ├── scripts/
-│   ├── install.ps1                     # One-command installer to all 3 platform skill dirs
-│   ├── scan-drive.ps1                  # Read-only scan + classification (phase 1)
-│   ├── clean-drive.ps1                 # Approval-gated cleanup + quarantine (phase 3)
-│   ├── verify-report.ps1               # Verify + summary report (phase 4)
-│   ├── schedule.ps1                    # Policy-based platform scheduler integration
+│   ├── install.py                      # Installer to all three platform skill dirs
+│   ├── scanner.py                      # Read-only scan + classification (phase 1)
+│   ├── cleaner.py                      # Approval-gated cleanup + quarantine (phase 3)
+│   ├── report.py                       # Verify + summary report (phase 4)
+│   ├── schedule.py                     # Policy-based platform scheduler integration
 │   └── lib/
-│       ├── platform.ps1                # Platform paths, fixed-drive, and host helpers
-│       └── rubbish-core.ps1            # Safety function library (classify/quarantine/report)
+│       ├── platform.py                 # Platform paths and fixed-drive helpers
+│       └── core.py                     # Safety function library
 ├── references/
 │   ├── junk-taxonomy.md                # Junk file taxonomy
 │   ├── per-app-path-map.md             # Common app cache/temp path map
 │   └── safety-rules.md                 # Safety rules & exclusion list
 └── tests/
-    ├── run-tests.ps1                   # Dual-mode test entry point
-    ├── unit/
-    │   ├── scan.Tests.ps1              # Pester 5 unit tests (scan classification)
-    │   ├── clean.Tests.ps1             # Pester 5 unit tests (safe delete + quarantine)
-    │   ├── core.Tests.ps1              # Pester 5 unit tests (core library)
-    │   ├── report.Tests.ps1            # Pester 5 unit tests (report)
-    │   └── optimization.Tests.ps1      # Pester 5 unit tests (batch and resume behavior)
-    └── sandbox/
-        └── run-sandbox-tests.ps1       # Zero-dependency fallback harness (nine suites)
+    ├── test_runner.py                 # Compileall + pytest/fallback entry point
+    └── test_*.py                       # Six Python behavior suites
 ```
 
 ## Testing
 
 The local test entry point is **dual-mode** and conditionally picks its runner:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\run-tests.ps1
+```bash
+python -m pip install -r requirements.txt
+python tests/test_runner.py
 ```
 
-- **Mode 0 (always, first):** parse-checks every `.ps1` under `scripts/` and `tests/` via `[System.Management.Automation.Language.Parser]::ParseFile`; exits 1 before any branch if a parse error is found.
-- **Mode 1 (branch):**
-  - **Pester 5.x installed** → prints `BRANCH: PESTER` and runs five `tests/unit/*.Tests.ps1` files containing 55 tests via `Invoke-Pester -PassThru`; exits 0 only if all pass.
-  - **Pester 5.x not installed** → prints `BRANCH: SANDBOX` and delegates to the zero-dependency `tests/sandbox/run-sandbox-tests.ps1` harness, which runs nine plain-PowerShell suites and builds/cleans its own temp tree under `$env:TEMP\rubbish-cleaner-tests\<pid>`; its exit code is propagated.
+- **Mode 0 (always, first):** compiles every Python module under `scripts/` and `tests/`; exits 1 before any test branch if a syntax error is found.
+- **Mode 1 (branch):** uses pytest when installed (`python -m pytest tests/ -x --tb=short`), otherwise imports and runs `test_` functions with the same exit-code semantics.
+- The six suites build fake trees under temporary directories and never touch real drives. `psutil` is required; `pywin32` is installed only on Windows.
 
-GitHub Actions runs parser checks, Pester, and the sandbox harness on Windows, Ubuntu, and macOS. Windows also runs the full entry point under Windows PowerShell 5.1. Exit code 0 means all selected assertions passed.
+GitHub Actions runs compileall, the Python 3.10 compatibility gate, pytest, and a read-only scanner smoke test on Windows, Ubuntu, and macOS for Python 3.10–3.12. Exit code 0 means all selected assertions passed.
 
 ## Current status
 
 ### Shipped capabilities
 
 - Cross-platform fixed-drive support: `C:` on Windows and `/` on Linux/macOS.
-- Platform-specific default paths and PowerShell host selection.
+- Python 3.10+ implementation with psutil; optional pywin32 is used only for Windows UAC and Task Scheduler integration.
 - Multi-drive processing and checkpoint-based `-Resume` support.
 - Policy scheduling for Task Scheduler, cron, and launchd.
 - Approval-gated, quarantine-first cleanup; link-safe traversal; and native Windows/POSIX lock semantics.

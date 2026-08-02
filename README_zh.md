@@ -33,15 +33,16 @@
 /rubbish-cleaner 清理 D 盘的临时文件和缓存，不要动我的安装包和游戏存档
 ```
 
-agent 会读取 [SKILL.md](SKILL.md) 并自行部署技能（如果还没安装，它会自己运行 `scripts\install.ps1`，无需任何手动步骤），然后按内置的 扫描 → 批准 → 清理 → 校验 → 报告 流程执行，向你展示候选清单，并在删除任何东西之前征求你的确认。
+agent 会读取 [SKILL.md](SKILL.md) 并自行部署技能（如果还没安装，它会自己运行 `python scripts/install.py`，无需任何手动步骤），然后按内置的扫描 → 批准 → 清理 → 校验 → 报告流程执行，向你展示候选清单，并在删除任何东西之前征求你的确认。
 
 **方式 2：手动安装（可选）。** 一条命令，无需管理员权限，可重复执行：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\install.ps1
+```bash
+python -m pip install -r requirements.txt
+python scripts/install.py --target all
 ```
 
-`-Target all|claude|codex|opencode` 用于选择平台（默认 `all`）。会安装到 `%USERPROFILE%\.claude\skills\rubbish-cleaner\`、`%USERPROFILE%\.codex\skills\rubbish-cleaner\` 和 `%USERPROFILE%\.config\opencode\skills\automation\rubbish-cleaner\`。
+`--target all|claude|codex|opencode` 用于选择平台（默认 `all`）。会安装到当前用户对应的 Claude Code、Codex 和 opencode skill 目录。
 
 ## 在 agent 中使用
 
@@ -75,55 +76,48 @@ rubbish-cleaner/
 ├── SKILL.md                            # Skill 核心（渐进式披露）
 ├── README.md / README_zh.md            # 中英文文档（本文件）
 ├── LICENSE                             # MIT
-├── requirements.txt                    # 依赖说明（无第三方运行时依赖）
+├── requirements.txt                    # psutil，以及仅 Windows 使用的 pywin32
 ├── agents/
 │   └── openai.yaml                     # Codex UI 元数据，Claude Code 可忽略
 ├── scripts/
-│   ├── install.ps1                     # 一键安装到三平台 skill 目录
-│   ├── scan-drive.ps1                  # 只读扫描 + 分类（阶段 1）
-│   ├── clean-drive.ps1                 # 审批门控清理 + 隔离（阶段 3）
-│   ├── verify-report.ps1               # 校验 + 汇总报告（阶段 4）
-│   ├── schedule.ps1                    # 基于策略的平台定时任务集成
+│   ├── install.py                      # 一键安装到三平台 skill 目录
+│   ├── scanner.py                      # 只读扫描 + 分类（阶段 1）
+│   ├── cleaner.py                      # 审批门控清理 + 隔离（阶段 3）
+│   ├── report.py                       # 校验 + 汇总报告（阶段 4）
+│   ├── schedule.py                     # 基于策略的平台定时任务集成
 │   └── lib/
-│       ├── platform.ps1                # 平台路径、固定盘和宿主程序辅助函数
-│       └── rubbish-core.ps1            # 安全函数库（分类/隔离/报告）
+│       ├── platform.py                 # 平台路径和固定盘辅助函数
+│       └── core.py                     # 安全函数库
 ├── references/
 │   ├── junk-taxonomy.md                # 垃圾文件分类法
 │   ├── per-app-path-map.md             # 常见应用缓存/临时路径映射
 │   └── safety-rules.md                 # 安全规则与排除清单
 └── tests/
-    ├── run-tests.ps1                   # 双模式测试入口
-    ├── unit/
-    │   ├── scan.Tests.ps1              # Pester 5 单元测试（扫描分类）
-    │   ├── clean.Tests.ps1             # Pester 5 单元测试（安全删除+隔离）
-    │   ├── core.Tests.ps1              # Pester 5 单元测试（核心库）
-    │   ├── report.Tests.ps1            # Pester 5 单元测试（报告）
-    │   └── optimization.Tests.ps1      # Pester 5 单元测试（批量和断点续扫）
-    └── sandbox/
-        └── run-sandbox-tests.ps1       # 零依赖回退 harness（九个套件）
+    ├── test_runner.py                 # compileall + pytest/回退入口
+    └── test_*.py                       # 六个 Python 行为测试套件
 ```
 
 ## 测试
 
 本地测试入口是**双模式**的，会按条件选择执行器：
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File D:\rubbish_cleaning\tests\run-tests.ps1
+```bash
+python -m pip install -r requirements.txt
+python tests/test_runner.py
 ```
 
-- **模式 0（总是先执行）：** 通过 `[System.Management.Automation.Language.Parser]::ParseFile` 对 `scripts/` 和 `tests/` 下所有 `.ps1` 做语法解析检查；只要发现解析错误，就会在任何分支执行前以退出码 1 退出。
-- **模式 1（分支）：**
-  - **已安装 Pester 5.x** → 打印 `BRANCH: PESTER`，并通过 `Invoke-Pester -PassThru` 运行五个 `tests/unit/*.Tests.ps1` 文件中的 55 个测试；只有全部通过才以 0 退出。
-  - **未安装 Pester 5.x** → 打印 `BRANCH: SANDBOX`，转交给零依赖 `tests/sandbox/run-sandbox-tests.ps1` harness（九个纯 PowerShell 套件，在 `$env:TEMP\rubbish-cleaner-tests\<pid>` 下自建并清理自己的临时目录树），透传其退出码。
+- **模式 0（总是先执行）：** 对 `scripts/` 和 `tests/` 下所有 Python 文件运行 compileall；只要发现语法错误，就在测试分支前以退出码 1 退出。
+- **模式 1（分支）：** 安装 pytest 时运行六个 Python 测试套件；未安装时由 `test_runner.py` 回退到零依赖的 `test_` 函数执行。
+- 测试只在临时目录构造 fake tree，不接触真实磁盘；`psutil` 为必需依赖，`pywin32` 仅在 Windows 安装。
 
-GitHub Actions 在 Windows、Ubuntu 和 macOS 上运行语法解析检查、Pester 和 sandbox harness；Windows 还会通过 Windows PowerShell 5.1 运行完整测试入口。退出码 0 表示所选断言全部通过。
+GitHub Actions 在 Windows、Ubuntu 和 macOS 上使用 Python 3.10、3.11、3.12 运行 compileall、兼容性检查、pytest 和只读扫描 smoke 测试。退出码 0 表示所选断言全部通过。
 
 ## 当前状态
 
 ### 已交付能力
 
 - 跨平台固定盘支持：Windows 使用 `C:`，Linux/macOS 使用 `/`。
-- 平台特定的默认路径和 PowerShell 宿主程序选择。
+- Python 3.10+ 实现，使用 psutil；可选 pywin32 仅用于 Windows UAC 和 Task Scheduler。
 - 多盘处理和基于检查点的 `-Resume` 断点续扫/续清。
 - 面向任务计划程序、cron 和 launchd 的策略定时。
 - 审批门控、隔离优先的清理；链接安全遍历；以及原生 Windows/POSIX 锁语义。

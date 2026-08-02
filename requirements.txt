@@ -2,6 +2,6 @@
 # Required:
 psutil>=5.9
 # Optional (Windows-only):
-pywin32>=306  # Task Scheduler, UAC, event log (imported only on Windows)
+pywin32>=306; sys_platform == "win32"  # Task Scheduler, UAC, event log (Windows only)
 # Dev:
 pytest>=8

@@ -5,6 +5,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from typing import Dict, Optional, Union
 
 import psutil
 
@@ -44,7 +45,7 @@ def get_fixed_drives() -> list[str]:
     return drives
 
 
-def get_user_cache_dir() -> str | Path | None:
+def get_user_cache_dir() -> Optional[Union[str, Path]]:
     """Return the conventional per-user cache directory for this platform."""
     if IS_WINDOWS:
         return os.environ.get("LOCALAPPDATA")
@@ -65,7 +66,7 @@ def get_user_documents_dir() -> Path:
     return Path.home()
 
 
-def resolve_fixed_drive(drive: str) -> dict[str, str | int] | None:
+def resolve_fixed_drive(drive: str) -> Optional[Dict[str, Union[str, int]]]:
     """Return capacity data for a usable fixed drive, or ``None`` if invalid."""
     if IS_WINDOWS:
         normalized_drive = drive.rstrip("\\/") if isinstance(drive, str) else ""

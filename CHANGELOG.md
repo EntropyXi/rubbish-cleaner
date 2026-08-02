@@ -5,17 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.0.0] - 2026-08-01
+
+### Changed
+
+- Ported the scan → approve → clean → verify → report workflow from PowerShell to Python 3.10+.
+- Added the cross-platform `psutil` runtime dependency; `pywin32` is gated to Windows for UAC and Task Scheduler integration.
+- Replaced the PowerShell test harness with six pytest suites plus a dependency-free compileall/fallback runner.
+- Unified Windows, Ubuntu, and macOS CI with Python 3.10–3.12 compatibility checks and read-only scanner smoke tests.
+- Preserved quarantine-first cleanup, junction/symlink safety, seven-day freshness gates, checkpoint/resume, and native Windows/POSIX lock semantics.
+
 ## [v1.1.0] - 2026-08-01
 
 ### Added
 
-- Added multi-drive batch execution with `-Drives` for [`scripts/scan-drive.ps1`](scripts/scan-drive.ps1), [`scripts/clean-drive.ps1`](scripts/clean-drive.ps1), and [`scripts/verify-report.ps1`](scripts/verify-report.ps1). The optional `scan-drive.ps1 -Parallel` path scans multiple drives concurrently, and scan and cleanup deliver category-level progress; cleanup remains sequential and approval-gated.
-- Added scan and cleanup checkpoints with `-Resume`, plus policy-based scheduling through [`scripts/schedule.ps1`](scripts/schedule.ps1) and the [`references/policies/`](references/policies/) profiles.
+- Added multi-drive batch execution with `-Drives` for [`scripts/scanner.py`](scripts/scanner.py), [`scripts/cleaner.py`](scripts/cleaner.py), and [`scripts/report.py`](scripts/report.py). The optional `scanner.py -Parallel` path scans multiple drives concurrently, and scan and cleanup deliver category-level progress; cleanup remains sequential and approval-gated.
+- Added scan and cleanup checkpoints with `-Resume`, plus policy-based scheduling through [`scripts/schedule.py`](scripts/schedule.py) and the [`references/policies/`](references/policies/) profiles.
 
 ### Changed
 
-- Added fixed-drive resolution, platform-specific default paths, and PowerShell host selection through [`scripts/lib/platform.ps1`](scripts/lib/platform.ps1), so supported Windows, Linux, and macOS hosts use the appropriate drive and runtime semantics.
-- Updated [`scripts/lib/rubbish-core.ps1`](scripts/lib/rubbish-core.ps1) for POSIX link handling and locked-item behavior.
+- Added fixed-drive resolution and platform-specific default paths through [`scripts/lib/platform.py`](scripts/lib/platform.py), so supported Windows, Linux, and macOS hosts use the appropriate drive and runtime semantics.
+- Updated [`scripts/lib/core.py`](scripts/lib/core.py) for POSIX link handling and locked-item behavior.
 
 ### Fixed
 
@@ -24,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
-- Made Pester pass/fail results explicit in [`tests/run-tests.ps1`](tests/run-tests.ps1) and [`.github/workflows/test.yml`](.github/workflows/test.yml).
+- Made pytest/fallback pass/fail results explicit in [`tests/test_runner.py`](tests/test_runner.py) and [`.github/workflows/test.yml`](.github/workflows/test.yml).
 - Expanded CI to a Windows, Ubuntu, and macOS matrix, including the Windows PowerShell 5.1 test entry point.
 
 ## [v1.0.0] - 2026-07-31
@@ -33,14 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Repository scaffolded as the `rubbish-cleaner` skill and created on GitHub via the CLI (`gh`); development follows a feature-branch git workflow.
 - [SKILL.md](SKILL.md): skill core with progressive disclosure.
-- `lib/rubbish-core.ps1`: safety function library (classification, quarantine, reporting helpers).
+- `scripts/lib/core.py`: safety function library (classification, quarantine, reporting helpers).
 - Core scripts:
-  - `scripts/scan-drive.ps1`: read-only drive scan + junk classification.
-  - `scripts/clean-drive.ps1`: approval-gated safe cleanup with quarantine.
-  - `scripts/verify-report.ps1`: post-clean verification + summary report.
+  - `scripts/scanner.py`: read-only drive scan + junk classification.
+  - `scripts/cleaner.py`: approval-gated safe cleanup with quarantine.
+  - `scripts/report.py`: post-clean verification + summary report.
 - References: [junk-taxonomy.md](references/junk-taxonomy.md), [safety-rules.md](references/safety-rules.md), [per-app-path-map.md](references/per-app-path-map.md).
-- Dual-mode test suite: zero-dependency sandbox harness (`tests/sandbox/run-sandbox-tests.ps1`) and Pester 5 unit tests (`tests/unit/`).
-- [install.ps1](scripts/install.ps1): one-command installer; the skill is installed into the Claude Code, Codex and opencode skill directories, and the opencode skill index is updated (external config).
+- Dual-mode test suite: dependency-free fallback runner (`tests/test_runner.py`) and six pytest files.
+- [install.py](scripts/install.py): one-command installer; the skill is installed into the Claude Code, Codex and opencode skill directories.
 
 ### Changed
 
@@ -50,4 +60,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a "Limitations & Roadmap" section to the README.
 - Repository renamed to `rubbish_cleaning_skill`.
 
-Key files: [SKILL.md](SKILL.md), [README.md](README.md), [install.ps1](scripts/install.ps1), [CHANGELOG](CHANGELOG.md).
+Key files: [SKILL.md](SKILL.md), [README.md](README.md), [install.py](scripts/install.py), [CHANGELOG](CHANGELOG.md).
