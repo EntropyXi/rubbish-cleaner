@@ -55,7 +55,14 @@ def _is_windows_reparse_point(path: str) -> bool:
 
 
 def is_junction(path: str) -> bool:
-    """Return whether *path* is a Windows junction or other reparse point."""
+    """Return whether *path* is a Windows reparse point traversal must skip.
+
+    This covers junctions (reparse tag IO_REPARSE_TAG_MOUNT_POINT) AND
+    symlinks (IO_REPARSE_TAG_SYMLINK): ``os.path.isjunction`` (3.12+) only
+    reports true junctions, so a directory symlink would otherwise be a false
+    negative and slip past the guard.  Callers use this to decide whether to
+    skip a path as a traversal link, so any reparse point must be True.
+    """
     if not IS_WINDOWS:
         return False
 
@@ -64,10 +71,13 @@ def is_junction(path: str) -> bool:
     except FileNotFoundError:
         return False
 
+    if os.path.islink(path):
+        return True
     path_is_junction = getattr(os.path, "isjunction", None)
     if path_is_junction is not None:
         try:
-            return bool(path_is_junction(path))
+            if path_is_junction(path):
+                return True
         except OSError:
             pass
     return _is_windows_reparse_point(path)
@@ -91,28 +101,56 @@ def _path_is_traversal_link(path: str) -> bool:
     return is_junction(path)
 
 
+def _filesystem_root(path: str) -> str:
+    """Return the filesystem root that *path* lives on.
+
+    POSIX roots are ``/``; Windows roots are ``<drive>:\\`` (or the UNC
+    ``\\\\server\\share`` prefix for network paths).
+    """
+    drive, _ = os.path.splitdrive(os.path.abspath(os.fspath(path)))
+    if drive:
+        return drive + os.sep
+    return os.sep
+
+
 def _assert_no_traversal_components(path: str) -> str:
-    """Normalize *path* and reject every existing link/reparse component."""
+    """Normalize *path* and reject link/reparse components that escape the root.
+
+    The upward walk stops at the filesystem root itself: components at or above
+    the root are the operating system's fixed layout (e.g. macOS ``/var`` ->
+    ``/private/var``) and are never audited.  Each audited component below the
+    root is only refused when it is a link whose real target resolves outside
+    the filesystem root -- an OS-builtin link such as ``/var`` on macOS stays
+    within the system, while a user link or Windows junction pointing at a
+    different drive/root is a traversal vector and fails closed.
+    """
     normalized = _normalized_path(path)
+    root_realpath = os.path.normcase(os.path.realpath(_filesystem_root(normalized)))
+
     components: list[str] = []
     current = normalized
     while True:
-        components.append(current)
         parent = os.path.dirname(current)
         if parent == current:
+            # ``current`` is the filesystem root: OS layout, never audited.
             break
+        components.append(current)
         current = parent
 
     for component in reversed(components):
         try:
-            if _path_is_traversal_link(component):
-                raise OSError(
-                    errno.ELOOP,
-                    "Refusing a traversal-link path component",
-                    component,
-                )
+            if not _path_is_traversal_link(component):
+                continue
         except FileNotFoundError:
             continue
+        if os.path.normcase(os.path.realpath(component)).startswith(root_realpath):
+            # Link resolves inside the filesystem root: system layout, allowed.
+            continue
+        raise OSError(
+            errno.ELOOP,
+            "Refusing a traversal-link path component",
+            component,
+        )
     return normalized
 
 
