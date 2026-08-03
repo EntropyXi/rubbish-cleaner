@@ -243,13 +243,13 @@ def _process_row(
             "SKIP_JUNCTION",
             "refusing a symlink, junction, or linked ancestor",
         )
-
-    if action == "quarantine":
-        return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
-    if action not in {"delete", "ask"}:
+    if action not in {"quarantine", "delete", "ask"}:
         print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
         return "SKIP_REPORT_ONLY"
 
+    # FM1/FM2: quarantine and delete run the SAME lock probe. The quarantine
+    # early-return must NOT bypass it, and on POSIX an unlink decision never
+    # consults the advisory flock probe unless the user opted in explicitly.
     if os.path.isdir(target):
         if not core.is_dir_empty(target):
             return _record(
@@ -270,7 +270,7 @@ def _process_row(
                 return _record(
                     csv_path,
                     category,
-                    "Remove",
+                    "Quarantine" if action == "quarantine" else "Remove",
                     target,
                     "SKIP_TOO_RECENT",
                     "re-verify failed: last write is within the 7-day window",
@@ -288,12 +288,14 @@ def _process_row(
             return _record(
                 csv_path,
                 category,
-                "Remove",
+                "Quarantine" if action == "quarantine" else "Remove",
                 target,
                 "SKIP_LOCKED",
                 "re-verify failed: file is locked",
             )
 
+    if action == "quarantine":
+        return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
     if _has_traversal_link(target):
         return _record(
             csv_path,
