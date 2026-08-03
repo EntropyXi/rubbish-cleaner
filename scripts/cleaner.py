@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -19,6 +19,8 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.lib import core, platform
+
+import psutil
 
 
 IS_WINDOWS = platform.IS_WINDOWS
@@ -54,11 +56,105 @@ _CATEGORY_RISK_MAP = {
 }
 _CANONICAL_CATEGORY = {category.casefold(): category for category in _CATEGORY_RISK_MAP}
 
+# FM4: category -> owner-process specs (mirror of scanner.CATEGORY_OWNER_PROCESSES).
+# A running owner gates the WHOLE category: it is skipped with a clear message,
+# never killed. "jetbrains*" is a prefix match.
+_CATEGORY_OWNER_PROCESSES = {
+    "browser-caches": ["chrome", "msedge"],
+    "app-caches": ["wechat", "weixin", "wechatapp"],
+    "gpu-shader": [
+        "steam",
+        "wegame",
+        "epicgameslauncher",
+        "battle.net",
+        "valorant",
+        "cs2",
+        "dota2",
+        "overwatch",
+        "apexlegends",
+        "fortnite",
+        "minecraft",
+    ],
+    "dev-caches": ["pip", "npm", "python", "node"],
+    "ide-caches": ["jetbrains*", "zotero", "code"],
+    "crash-dumps": [],
+}
+
+_OWNER_DISPLAY = {
+    "chrome": "Chrome",
+    "msedge": "Edge",
+    "wechat": "微信",
+    "weixin": "微信",
+    "wechatapp": "微信",
+    "steam": "Steam",
+    "wegame": "WeGame",
+    "epicgameslauncher": "Epic Games",
+    "battle.net": "Battle.net",
+    "valorant": "Valorant",
+    "cs2": "CS2",
+    "dota2": "Dota 2",
+    "overwatch": "Overwatch",
+    "apexlegends": "Apex Legends",
+    "fortnite": "Fortnite",
+    "minecraft": "Minecraft",
+    "pip": "pip",
+    "npm": "npm",
+    "python": "Python",
+    "node": "Node.js",
+    "jetbrains*": "JetBrains IDE",
+    "zotero": "Zotero",
+    "code": "VS Code",
+}
+
+_CATEGORY_DISPLAY = {
+    "browser-caches": "浏览器缓存",
+    "app-caches": "应用缓存",
+    "gpu-shader": "GPU 着色器缓存",
+    "dev-caches": "开发工具缓存",
+    "ide-caches": "IDE 缓存",
+    "crash-dumps": "崩溃转储",
+}
+
+# FM5: execution action enum (mirror of scanner.CATEGORY_ACTION_MAP). Cache
+# categories -> clean_contents (delete files inside, KEEP the directory);
+# empty-dirs -> remove_if_empty (only delete verified-empty dirs).
+_CATEGORY_EXECUTION_MAP = {
+    "app-caches": "clean_contents",
+    "browser-caches": "clean_contents",
+    "gpu-shader": "clean_contents",
+    "dev-caches": "clean_contents",
+    "ide-caches": "clean_contents",
+    "crash-dumps": "clean_contents",
+    "empty-dirs": "remove_if_empty",
+}
+
 
 def _drive_id(drive: str) -> str:
     if IS_WINDOWS:
         return drive.rstrip("\\/").rstrip(":").upper()
     return "ROOT"
+
+
+def _default_quarantine_dir(drive: str) -> Path:
+    """Resolve the same-volume default quarantine directory for a drive.
+
+    FM9: the default must live on the SAME volume as the source so the
+    ``os.rename`` in ``core.quarantine`` never crosses a device boundary — the
+    old Desktop-based default moved files from e.g. ``D:`` to ``C:`` and the
+    resulting cross-volume EXDEV surfaced as a silent ``MOVE_FAILED``.
+
+    Windows places the quarantine on the target drive root under
+    ``X:\\.rubbish-quarantine\\run-<timestamp>\\``, per-run scoped so repeated
+    runs never collide with an existing destination. POSIX targets are always
+    ``/``, which a normal user cannot write at the root, so we fall back to a
+    per-run subdir under the legacy quarantine location.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if IS_WINDOWS:
+        anchor = Path(drive).anchor
+        root = Path(anchor.rstrip("\\/") + os.sep) if anchor else Path(drive.rstrip("\\/") + os.sep)
+        return root / ".rubbish-quarantine" / f"run-{stamp}"
+    return Path.home() / "Desktop" / ".omo" / "quarantine" / "ROOT" / f"run-{stamp}"
 
 
 def _split_values(values: object) -> list[str]:
@@ -69,6 +165,67 @@ def _split_values(values: object) -> list[str]:
     for value in source:
         result.extend(part.strip() for part in str(value).split(",") if part.strip())
     return result
+
+
+def _size_of(path: str) -> int:
+    try:
+        return int(os.stat(path, follow_symlinks=False).st_size)
+    except OSError:
+        return 0
+
+
+def _preview_line(
+    path: object,
+    size: int,
+    category: str,
+    action: str,
+    reason: str = "",
+) -> str:
+    """FM13: uniform per-file dry-run preview line.
+
+    Format: ``path | size | category | action | reason`` so the ``--dry-run``
+    output doubles as a real preview diff the user can review before approving
+    any category.
+    """
+    base = f"DRY-RUN: {path} | {size} bytes | {category} | {action}"
+    return f"{base} | {reason}" if reason else base
+
+
+def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
+    """Return the lowercased stem of every currently running process name."""
+    stems: set[str] = set()
+    iter_func = process_iter or psutil.process_iter
+    try:
+        processes = iter_func(["name"])
+        for process in processes:
+            try:
+                name = str(process.info.get("name") or "")
+            except (psutil.Error, OSError):
+                continue
+            stems.add(Path(name).stem.casefold())
+    except (psutil.Error, OSError):
+        pass
+    return stems
+
+
+def _process_spec_matches(spec: str, stems: set[str]) -> bool:
+    """Whether a running stem satisfies an owner spec (``jetbrains*`` prefix)."""
+    if spec.endswith("*"):
+        prefix = spec[:-1].casefold()
+        return any(stem.startswith(prefix) for stem in stems)
+    return spec.casefold() in stems
+
+
+def _owners_running(category: str, stems: set[str]) -> list[str]:
+    """Return the owner-process specs of *category* that are currently running."""
+    owners = _CATEGORY_OWNER_PROCESSES.get(category) or []
+    return [spec for spec in owners if _process_spec_matches(spec, stems)]
+
+
+def _fm4_skip_message(category: str, owners: Sequence[str]) -> str:
+    display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in owners}))
+    category_display = _CATEGORY_DISPLAY.get(category, category)
+    return f"检测到 {display} 运行中，{category_display}清理已跳过。关闭后重跑该类别即可。"
 
 
 def _write_text_no_follow(path: Path, text: str) -> None:
@@ -119,11 +276,27 @@ def _read_candidates(path: Path) -> list[dict[str, str]]:
                     f"Malformed candidates.csv row {index + 2}: unknown Category '{row['Category']}'"
                 )
             expected_risk = _CATEGORY_RISK_MAP[canonical_category]
-            expected_action = _RISK_ACTION_MAP[expected_risk]
-            if row["Risk"] != expected_risk or row["Action"] != expected_action:
+            # FM7: a normally-SAFE cache category may carry an escalated
+            # CAUTION row (data-signature -> quarantine). CAUTION is the ONLY
+            # allowed escalation, and only for SAFE (or already-CAUTION)
+            # categories. The row's action must match ITS OWN risk, so a
+            # CAUTION row can never carry Action=delete.
+            if row["Risk"] == "CAUTION":
+                if expected_risk not in {"SAFE", "CAUTION"}:
+                    raise ValueError(
+                        f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                        f"cannot carry the FM7 CAUTION escalation"
+                    )
+            elif row["Risk"] != expected_risk:
                 raise ValueError(
                     f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
-                    f"requires Risk '{expected_risk}' and Action '{expected_action}'"
+                    f"requires Risk '{expected_risk}'"
+                )
+            expected_action = _RISK_ACTION_MAP[row["Risk"]]
+            if row["Action"] != expected_action:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                    f"requires Action '{expected_action}' for Risk '{row['Risk']}'"
                 )
             row["Category"] = canonical_category
             try:
@@ -141,7 +314,11 @@ def _group_rows(rows: list[dict[str, str]]) -> OrderedDict[str, list[tuple[int, 
         groups.setdefault(row["Category"], []).append((index, row))
     for category, entries in groups.items():
         risks = {row["Risk"] for _, row in entries}
-        if len(risks) != 1:
+        canonical = _CATEGORY_RISK_MAP.get(category)
+        # FM7: a SAFE (or CAUTION) category may mix canonical + CAUTION rows
+        # when some of its directories carry the data-signature escalation.
+        allowed = {canonical, "CAUTION"} if canonical in {"SAFE", "CAUTION"} else {canonical}
+        if not risks.issubset(allowed):
             raise ValueError(f"Category '{category}' has inconsistent Risk values")
     return groups
 
@@ -216,6 +393,48 @@ def _record(
     return disposition
 
 
+def _skip_reasons(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Map (Path, Disposition) -> ErrorMessage from the cleanup audit CSV."""
+    reasons: dict[tuple[str, str], str] = {}
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream, delimiter="|"):
+                reasons[(row.get("Path", ""), row.get("Disposition", ""))] = row.get(
+                    "ErrorMessage", ""
+                )
+    except OSError:
+        return {}
+    return reasons
+
+
+def _print_clean_report(
+    dispositions: Sequence[dict[str, str]],
+    csv_path: Path,
+    *,
+    dry_run: bool,
+) -> None:
+    """FM13: post-clean report lists deleted + skipped + reasons."""
+    if not dispositions:
+        return
+    counts: dict[str, int] = {}
+    skipped: list[dict[str, str]] = []
+    for item in dispositions:
+        disposition = item["Disposition"]
+        counts[disposition] = counts.get(disposition, 0) + 1
+        if disposition not in {"OK", "QUARANTINED", "DRY_RUN"}:
+            skipped.append(item)
+    print(f"REPORT: {len(dispositions)} item(s) processed, {len(skipped)} skipped")
+    for disposition in sorted(counts):
+        print(f"  {disposition}: {counts[disposition]}")
+    if not skipped:
+        return
+    reasons = {} if dry_run or not csv_path.is_file() else _skip_reasons(csv_path)
+    for item in skipped[:10]:
+        reason = reasons.get((item["Path"], item["Disposition"]), "")
+        suffix = f" ({reason})" if reason else ""
+        print(f"  SKIP {item['Path']} -> {item['Disposition']}{suffix}")
+
+
 def _has_traversal_link(path: str) -> bool:
     try:
         core._assert_no_traversal_components(path)
@@ -224,25 +443,335 @@ def _has_traversal_link(path: str) -> bool:
         return True
 
 
-def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_dir: Path) -> str:
-    target = row["Path"]
-    action = row["Action"]
-    if _has_traversal_link(target):
+def _iter_regular_files(directory: Path) -> Iterable[Path]:
+    """Yield regular files under *directory*, never following links."""
+    stack = [directory]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as iterator:
+                entries = list(iterator)
+        except OSError:
+            continue
+        for entry in entries:
+            child = Path(entry.path)
+            try:
+                if entry.is_symlink() or _has_traversal_link(str(child)):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(child)
+                    continue
+                yield child
+            except OSError:
+                continue
+
+
+def _clean_contents(
+    category: str,
+    target_dir: str,
+    csv_path: Path,
+    *,
+    running_stems: set[str],
+    allow_posix_unlink: bool,
+    dry_run: bool,
+) -> str:
+    """FM5: recursively delete FILES inside *target_dir*, KEEPING the directory.
+
+    Every file re-enters the Layer-2 verification chain (junction guard,
+    process gate, lock probe, temp age re-check) before removal. FM4's
+    category gate normally prevents this from running while an owner process
+    is active; the owner check here is defense-in-depth for apps started
+    between the scan and this clean run.
+    """
+    target = Path(target_dir)
+    if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
+        message = "re-verify failed: directory is missing or a traversal link"
+        if dry_run:
+            print(_preview_line(target_dir, 0, category, "clean_contents", message))
+            return "DRY_RUN"
+        return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
+    if not dry_run and _owners_running(category, running_stems):
         return _record(
             csv_path,
             category,
-            "Quarantine" if action == "quarantine" else "Remove",
+            "Remove",
+            target_dir,
+            "SKIP_LOCKED",
+            "owner process started between scan and clean (defense-in-depth)",
+        )
+
+    if dry_run:
+        for file_path in _iter_regular_files(target):
+            print(
+                _preview_line(
+                    file_path,
+                    _size_of(str(file_path)),
+                    category,
+                    "clean_contents",
+                    "keeps directory",
+                )
+            )
+        return "DRY_RUN"
+
+    deleted = 0
+    for file_path in _iter_regular_files(target):
+        if category in _TEMP_CATEGORIES:
+            try:
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(file_path, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
+            except OSError:
+                too_recent = False
+            if too_recent:
+                _record(
+                    csv_path,
+                    category,
+                    "Remove",
+                    str(file_path),
+                    "SKIP_TOO_RECENT",
+                    "re-verify failed: last write is within the 7-day window",
+                )
+                continue
+        if core.test_file_locked(str(file_path)):
+            _record(
+                csv_path,
+                category,
+                "Remove",
+                str(file_path),
+                "SKIP_LOCKED",
+                "re-verify failed: file is locked (in use by a process)",
+            )
+            continue
+        disposition = core.safe_remove(str(file_path), category, os.fspath(csv_path))
+        if disposition == "OK":
+            deleted += 1
+    return "OK"
+
+
+def _remove_if_empty(category: str, target_dir: str, csv_path: Path, *, dry_run: bool) -> str:
+    """FM5: delete *target_dir* only when it is verified empty (junction-aware)."""
+    if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
+        message = "re-verify failed: directory is missing or a traversal link"
+        if dry_run:
+            print(_preview_line(target_dir, 0, category, "remove_if_empty", message))
+            return "DRY_RUN"
+        return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
+    if not core.is_dir_empty(target_dir):
+        if dry_run:
+            print(_preview_line(target_dir, 0, category, "remove_if_empty", "SKIP_NOT_EMPTY"))
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target_dir,
+            "SKIP_NOT_EMPTY",
+            "re-verify failed: directory is not empty",
+        )
+    if dry_run:
+        print(_preview_line(target_dir, 0, category, "remove_if_empty", "verified empty"))
+        return "DRY_RUN"
+    return core.safe_remove(target_dir, category, os.fspath(csv_path))
+
+
+def _process_row(
+    row: dict[str, str],
+    category: str,
+    csv_path: Path,
+    quarantine_dir: Path,
+    *,
+    allow_posix_unlink: bool = False,
+    running_stems: Optional[set[str]] = None,
+    dry_run: bool = False,
+) -> str:
+    """Dispatch ONE candidate row to the right execution path.
+
+    FM7 x FM5: the ROW's explicit Action wins over the category->execution
+    default. A cache directory whose content signature is data-like is
+    escalated to CAUTION with Action=quarantine — it must be MOVED to
+    quarantine (never ``clean_contents``'d in place). The category map
+    (cache -> clean_contents, empty-dirs -> remove_if_empty) is only a
+    DEFAULT for plain ``delete`` rows; a row that says ``quarantine`` /
+    ``clean_contents`` / ``ask`` is honored verbatim.
+    """
+    target = row["Path"]
+    action = row["Action"]
+    risk = row["Risk"]
+    running = running_stems if running_stems is not None else set()
+
+    if action == "quarantine" or risk == "CAUTION":
+        return _quarantine_path(
+            category,
+            target,
+            csv_path,
+            quarantine_dir,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+    if action == "clean_contents":
+        return _clean_contents(
+            category,
+            target,
+            csv_path,
+            running_stems=running,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+    if action == "delete":
+        # FM5 default: cache categories clean only their contents (keeping the
+        # directory); empty-dirs removes only verified-empty directories.
+        execution = _CATEGORY_EXECUTION_MAP.get(category, "delete")
+        if execution == "clean_contents" and os.path.isdir(target):
+            return _clean_contents(
+                category,
+                target,
+                csv_path,
+                running_stems=running,
+                allow_posix_unlink=allow_posix_unlink,
+                dry_run=dry_run,
+            )
+        if execution == "remove_if_empty":
+            return _remove_if_empty(category, target, csv_path, dry_run=dry_run)
+        return _single_path_remove(
+            category,
+            target,
+            csv_path,
+            action,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+    if action == "ask":
+        # Approval was already resolved at the CATEGORY level; the item goes
+        # through the same single-path, lock-probed remove path.
+        return _single_path_remove(
+            category,
+            target,
+            csv_path,
+            action,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+
+    if _has_traversal_link(target):
+        if dry_run:
+            print(_preview_line(target, _size_of(target), category, action, "SKIP_JUNCTION"))
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Remove",
             target,
             "SKIP_JUNCTION",
             "refusing a symlink, junction, or linked ancestor",
         )
+    print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
+    return "SKIP_REPORT_ONLY"
 
-    if action == "quarantine":
-        return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
-    if action not in {"delete", "ask"}:
-        print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
-        return "SKIP_REPORT_ONLY"
 
+def _quarantine_path(
+    category: str,
+    target: str,
+    csv_path: Path,
+    quarantine_dir: Path,
+    *,
+    allow_posix_unlink: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Quarantine a single path (FM7 CAUTION escalation or CAUTION category).
+
+    FM2: quarantine runs the SAME lock probe as delete — there is no
+    early-return bypass; a locked item is SKIP_LOCKED / SKIP_POSIX_UNSAFE,
+    never moved. A non-empty directory is MOVED whole (``os.rename`` moves
+    trees); only the delete path refuses non-empty dirs.
+    """
+    if _has_traversal_link(target):
+        if dry_run:
+            print(_preview_line(target, _size_of(target), category, "quarantine", "SKIP_JUNCTION"))
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Quarantine",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
+    if dry_run:
+        print(_preview_line(target, _size_of(target), category, "quarantine"))
+        return "DRY_RUN"
+    if os.path.isfile(target):
+        if category in _TEMP_CATEGORIES:
+            try:
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(target, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
+            except OSError:
+                too_recent = False
+            if too_recent:
+                return _record(
+                    csv_path,
+                    category,
+                    "Quarantine",
+                    target,
+                    "SKIP_TOO_RECENT",
+                    "re-verify failed: last write is within the 7-day window",
+                )
+        # FM1: POSIX never consults the advisory flock probe for a deletion
+        # decision unless the user opted in explicitly with --allow-posix-unlink.
+        if not IS_WINDOWS and not allow_posix_unlink:
+            return _record(
+                csv_path,
+                category,
+                "Quarantine",
+                target,
+                "SKIP_POSIX_UNSAFE",
+                "POSIX unlink is disabled by default; pass --allow-posix-unlink to override",
+            )
+        if core.test_file_locked(target):
+            return _record(
+                csv_path,
+                category,
+                "Quarantine",
+                target,
+                "SKIP_LOCKED",
+                "re-verify failed: file is locked",
+            )
+    return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
+
+
+def _single_path_remove(
+    category: str,
+    target: str,
+    csv_path: Path,
+    action: str,
+    *,
+    allow_posix_unlink: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Single-path remove for delete/ask rows with no category-level default.
+
+    Junction guard first, then the FM1/FM2 lock-probe chain, then
+    ``core.safe_remove``. Non-empty directories are never removed.
+    """
+    if _has_traversal_link(target):
+        if dry_run:
+            print(_preview_line(target, _size_of(target), category, action, "SKIP_JUNCTION"))
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
+    if dry_run:
+        print(_preview_line(target, _size_of(target), category, action))
+        return "DRY_RUN"
     if os.path.isdir(target):
         if not core.is_dir_empty(target):
             return _record(
@@ -256,7 +785,11 @@ def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_
     elif os.path.isfile(target):
         if category in _TEMP_CATEGORIES:
             try:
-                too_recent = datetime.now().timestamp() - os.stat(target, follow_symlinks=False).st_mtime < timedelta(days=7).total_seconds()
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(target, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
             except OSError:
                 too_recent = False
             if too_recent:
@@ -268,6 +801,17 @@ def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_
                     "SKIP_TOO_RECENT",
                     "re-verify failed: last write is within the 7-day window",
                 )
+        # FM1: POSIX never consults the advisory flock probe for a deletion
+        # decision unless the user opted in explicitly with --allow-posix-unlink.
+        if not IS_WINDOWS and not allow_posix_unlink:
+            return _record(
+                csv_path,
+                category,
+                "Remove",
+                target,
+                "SKIP_POSIX_UNSAFE",
+                "POSIX unlink is disabled by default; pass --allow-posix-unlink to override",
+            )
         if core.test_file_locked(target):
             return _record(
                 csv_path,
@@ -277,16 +821,6 @@ def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_
                 "SKIP_LOCKED",
                 "re-verify failed: file is locked",
             )
-
-    if _has_traversal_link(target):
-        return _record(
-            csv_path,
-            category,
-            "Remove",
-            target,
-            "SKIP_JUNCTION",
-            "refusing a symlink, junction, or linked ancestor",
-        )
     return core.safe_remove(target, category, os.fspath(csv_path))
 
 
@@ -320,8 +854,17 @@ def _category_approved(
         return explicit
     if risk == "ASK":
         return False
+    file_count = sum(int(row["FileCount"]) for _, row in entries)
     total = sum(int(row["SizeBytes"]) for _, row in entries)
+    size_mb = total / (1024 * 1024)
     print(f"SUMMARY: category {category} - {len(entries)} item(s), {total} byte(s)")
+    # FM13: the confirmation shows what will actually be deleted - N files /
+    # X MB - plus the first few rows as short (basename-only) patterns so the
+    # user can see real targets without leaking full paths.
+    print(f"将删除 {file_count} 个文件 / {size_mb:.1f} MB")
+    for _, row in entries[:3]:
+        short = os.path.basename(row["Path"]) or row["Path"]
+        print(f"  - {short} ({row['Risk']}/{row['Action']})")
     try:
         answer = input_func(f"Clean category {category}? (y/n)")
     except EOFError:
@@ -329,21 +872,48 @@ def _category_approved(
     return answer.strip().lower().startswith("y")
 
 
-def _elevated_batch_text(drive: str) -> str:
-    drive_root = drive.rstrip("\\/")
-    windows_root = f"{drive_root}\\Windows"
-    return "\r\n".join(
-        [
-            "@echo off",
-            "setlocal",
-            "net stop wuauserv",
-            "dism.exe /online /cleanup-image /startcomponentcleanup",
-            f'del /f /q "{windows_root}\\Temp\\*"',
-            f'del /f /q "{windows_root}\\Prefetch\\*.pf"',
-            "exit /b 0",
-            "",
-        ]
-    )
+def _elevated_batch_text(drive: str, paths: Sequence[object]) -> str:
+    """Render the UAC-elevated cleanup batch from APPROVED candidate rows.
+
+    Every deletion line is generated per approved file and carries a
+    ``forfiles /d +7`` age gate as defense-in-depth; there is never a bare
+    ``del /f /q <dir>\\*`` command.  ``wuauserv`` is stopped for the DISM
+    step and restarted afterwards, and failures propagate via
+    ``if errorlevel 1 exit /b 1`` instead of an unconditional ``exit /b 0``.
+    """
+    cutoff = timedelta(days=7).total_seconds()
+    now = datetime.now().timestamp()
+    lines = ["@echo off", "setlocal"]
+    has_dism = False
+    for value in paths:
+        path = os.fspath(value)
+        if not path:
+            continue
+        if "StartComponentCleanup" in path:
+            has_dism = True
+            continue
+        if not os.path.isfile(path):
+            continue
+        try:
+            if now - os.stat(path, follow_symlinks=False).st_mtime < cutoff:
+                continue  # only files older than the 7-day window
+        except OSError:
+            continue
+        parent, name = os.path.split(path)
+        if not name or not parent:
+            continue
+        lines.append(
+            f'if exist "{path}" forfiles /d +7 /p "{parent}" /m "{name}" /c "cmd /c del /f /q @path"'
+        )
+    lines.append("net stop wuauserv >nul 2>&1")
+    if has_dism:
+        lines.append("dism.exe /online /cleanup-image /startcomponentcleanup")
+        lines.append("if errorlevel 1 exit /b 1")
+    lines.append("net start wuauserv >nul 2>&1")
+    lines.append("if errorlevel 1 exit /b 1")
+    lines.append("exit /b 0")
+    lines.append("")
+    return "\r\n".join(lines)
 
 
 def _shell_execute_elevated(batch_path: Path) -> int:
@@ -387,6 +957,7 @@ def _handle_elevated(
     is_user_drive: bool,
     is_system_drive: bool,
     shell_execute: Callable[[Path], object],
+    rows: Sequence[dict[str, str]],
 ) -> bool:
     if not (yes or skip_elevated):
         print(f"SKIP: category {category} requires -Yes or -SkipElevated")
@@ -413,7 +984,7 @@ def _handle_elevated(
         return True
 
     batch_path = run_dir / "elevated.bat"
-    _write_text_no_follow(batch_path, _elevated_batch_text(drive))
+    _write_text_no_follow(batch_path, _elevated_batch_text(drive, [row["Path"] for row in rows]))
     print(f"PREPARED: elevated batch written to {batch_path}")
     if skip_elevated:
         _record(
@@ -459,7 +1030,8 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     run_dir = candidates_path.parent
     cleanup_csv = run_dir / "cleanup-errors.csv"
     checkpoint_path = run_dir / "clean-checkpoint.json"
-    _ensure_cleanup_csv(cleanup_csv)
+    if not bool(kwargs.get("dry_run", False)):
+        _ensure_cleanup_csv(cleanup_csv)
 
     yes = bool(kwargs.get("yes", False))
     skip_elevated = bool(kwargs.get("skip_elevated", False))
@@ -468,6 +1040,17 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     approvals = kwargs.get("approvals")
     input_func = kwargs.get("input_func", input)
     shell_execute = kwargs.get("shell_execute", _shell_execute_elevated)
+    allow_posix_unlink = bool(kwargs.get("allow_posix_unlink", False))
+    dry_run = bool(kwargs.get("dry_run", False))
+    close_apps = bool(kwargs.get("close_apps", False))
+    process_iter = kwargs.get("process_iter")
+
+    # FM9: resolve quarantine ONCE per run. An explicit --quarantine-dir wins;
+    # otherwise the default is on the SAME volume as the source
+    # (X:\.rubbish-quarantine\run-<ts>) so cross-volume EXDEV -> MOVE_FAILED
+    # silent failure is impossible for the default path.
+    quarantine_value = kwargs.get("quarantine_dir")
+    quarantine_dir = Path(quarantine_value) if quarantine_value else _default_quarantine_dir(drive)
 
     if "is_user_drive" in kwargs:
         is_user_drive = bool(kwargs["is_user_drive"])
@@ -492,6 +1075,20 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     skipped_categories: list[str] = []
     dispositions: list[dict[str, str]] = []
 
+    # FM4: clean-time process snapshot. --close-apps prompts the user to close
+    # the running owner apps (never auto-kill) and then re-snapshots.
+    running_stems = _snapshot_process_stems(process_iter=process_iter)
+    if close_apps and not dry_run:
+        pending_owners: set[str] = set()
+        for category in groups:
+            if category == "elevated-system":
+                continue
+            pending_owners.update(_owners_running(category, running_stems))
+        if pending_owners:
+            display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in pending_owners}))
+            input_func(f"检测到以下应用正在运行：{display}。请关闭它们后按 Enter 继续（本工具不会自动关闭应用）")
+            running_stems = _snapshot_process_stems(process_iter=process_iter)
+
     for category, entries in groups.items():
         if categories and category.casefold() not in categories:
             skipped_categories.append(category)
@@ -501,24 +1098,36 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
             skipped_categories.append(category)
             print(f"SKIP: category {category} already completed (resume)")
             continue
+        # FM4 category-level gate: owner running -> the whole category is
+        # skipped with a clear message. elevated-system is never gated.
+        owners = [] if category == "elevated-system" else _owners_running(category, running_stems)
+        if owners:
+            print(f"SKIP: {_fm4_skip_message(category, owners)}")
+            skipped_categories.append(category)
+            continue
         pending = entries
 
         risk = entries[0][1]["Risk"]
         handled = False
         if risk == "ELEVATED":
-            handled = _handle_elevated(
-                category,
-                drive=drive,
-                run_dir=run_dir,
-                csv_path=cleanup_csv,
-                yes=yes,
-                skip_elevated=skip_elevated,
-                is_user_drive=is_user_drive,
-                is_system_drive=is_system_drive,
-                shell_execute=shell_execute,
-            )
+            if dry_run:
+                print(f"DRY-RUN: category {category} (report-only; elevated batch not generated)")
+                handled = True
+            else:
+                handled = _handle_elevated(
+                    category,
+                    drive=drive,
+                    run_dir=run_dir,
+                    csv_path=cleanup_csv,
+                    yes=yes,
+                    skip_elevated=skip_elevated,
+                    is_user_drive=is_user_drive,
+                    is_system_drive=is_system_drive,
+                    shell_execute=shell_execute,
+                    rows=[row for _, row in pending],
+                )
         else:
-            approved = _category_approved(
+            approved = dry_run or _category_approved(
                 category,
                 risk,
                 pending,
@@ -533,15 +1142,16 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                 else:
                     print(f"SKIP: category {category} declined by user")
                 continue
-            print(f"CLEAN: category {category} ({risk})")
+            print(f"{'DRY-RUN' if dry_run else 'CLEAN'}: category {category} ({risk})")
             for _, row in pending:
-                quarantine_value = kwargs.get("quarantine_dir")
-                default_quarantine = Path.home() / "Desktop" / ".omo" / "quarantine" / _drive_id(drive)
                 disposition = _process_row(
                     row,
                     category,
                     cleanup_csv,
-                    Path(quarantine_value or default_quarantine),
+                    quarantine_dir,
+                    allow_posix_unlink=allow_posix_unlink,
+                    running_stems=running_stems,
+                    dry_run=dry_run,
                 )
                 dispositions.append({"Category": category, "Path": row["Path"], "Disposition": disposition})
             handled = True
@@ -549,7 +1159,11 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         if handled:
             if category not in completed:
                 completed.append(category)
-            _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
+            if not dry_run:
+                _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
+
+    # FM13: post-clean report lists deleted + skipped + reasons.
+    _print_clean_report(dispositions, cleanup_csv, dry_run=dry_run)
 
     return {
         "drive": drive,
@@ -557,6 +1171,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         "candidates_csv": os.fspath(candidates_path),
         "cleanup_csv": os.fspath(cleanup_csv),
         "checkpoint": os.fspath(checkpoint_path),
+        "quarantine_dir": os.fspath(quarantine_dir),
         "completed_categories": completed,
         "skipped_categories": skipped_categories,
         "dispositions": dispositions,
@@ -575,6 +1190,12 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace) -> list[str]:
         command.append("-SkipElevated")
     if arguments.Resume:
         command.append("-Resume")
+    if arguments.allow_posix_unlink:
+        command.append("--allow-posix-unlink")
+    if getattr(arguments, "dry_run", False):
+        command.append("--dry-run")
+    if getattr(arguments, "close_apps", False):
+        command.append("--close-apps")
     if arguments.Categories:
         command.extend(["-Categories", ",".join(_split_values(arguments.Categories))])
     return command
@@ -607,6 +1228,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-SkipElevated", action="store_true")
     parser.add_argument("-Resume", action="store_true")
     parser.add_argument("-Parallel", action="store_true")
+    parser.add_argument(
+        "--allow-posix-unlink",
+        action="store_true",
+        default=False,
+        help="explicitly allow POSIX unlink of files (default: POSIX files are skipped as unsafe)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="print a per-file preview of every deletion without touching any file",
+    )
+    parser.add_argument(
+        "--close-apps",
+        action="store_true",
+        dest="close_apps",
+        help="prompt the user to close running owner apps (never auto-kill) instead of skipping their categories",
+    )
     return parser
 
 
@@ -630,11 +1269,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             categories=arguments.Categories,
             skip_elevated=arguments.SkipElevated,
             resume=arguments.Resume,
+            allow_posix_unlink=arguments.allow_posix_unlink,
+            dry_run=getattr(arguments, "dry_run", False),
+            close_apps=getattr(arguments, "close_apps", False),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(f"CLEAN COMPLETE: cleanup CSV at {result['cleanup_csv']}")
+    if result.get("quarantine_dir"):
+        print(
+            f"QUARANTINE: quarantined items were MOVED (not deleted) to "
+            f"{result['quarantine_dir']} and remain recoverable"
+        )
     return 0
 
 

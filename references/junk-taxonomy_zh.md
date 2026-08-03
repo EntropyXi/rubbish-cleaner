@@ -18,6 +18,10 @@ scan-drive.ps1 将这些人工验证过的目标泛化为可复用的、驱动�
 | ASK | `ask` | 必须用户显式批准（`-Yes`）才处理，否则整类跳过 |
 | ELEVATED | `report-only` | 只报告；清理只能由 UAC 提升的批处理执行，拒绝即跳过 |
 
+> **处置语义**：Windows 上文件被占用记 `SKIP_LOCKED`（CreateFileW 独占探测），隔离与删除共用
+> 同一锁探测。POSIX 上默认跳过不可安全 unlink 的文件（`SKIP_POSIX_UNSAFE`，advisory flock
+> 不可信），仅当显式传入 `--allow-posix-unlink` 才执行 flock 探测后删除。
+
 ## 分类总表
 
 | id | 风险 | 触发位置 | Action |

@@ -36,9 +36,10 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
   中断整次运行**（`$ErrorActionPreference = 'Continue'`）。
 - IOException → `SKIP_LOCKED`；UnauthorizedAccessException → `SKIP_ACCESS_DENIED`；
   ItemNotFound → `SKIP_NOT_FOUND`（按异常链顺序判定，ItemNotFound 优先）。
-- Windows 报告为锁定的文件会记入 cleanup CSV 并留给下次运行；POSIX 允许 unlink
-  打开中的文件，此时按成功删除记录 `OK`。
-- **绝不强杀进程、绝不重试循环**。
+- Windows 报告为锁定的文件会记入 cleanup CSV 并留给下次运行；POSIX **默认跳过**
+  无法安全 unlink 的文件（`SKIP_POSIX_UNSAFE`，不探测锁），仅当显式传入
+  `--allow-posix-unlink` 时才按原生 unlink 语义处理。
+- **绝不强杀进程、绝不重试循环**（属主应用正在运行的分类整类跳过并提示，绝不自动结束进程）。
 
 ## 5. 7 天规则
 
@@ -50,9 +51,10 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
 
 ## 6. 隔离政策（quarantine = 移动，永不删除）
 
-- CAUTION 分类（root-suspicious 等）→ `Invoke-Quarantine`：`Move-Item` 到
-  `$env:USERPROFILE\Desktop\.omo\quarantine\<盘符>\`。**移动 ≠ 删除**，原始文件
-  始终可移回。
+- CAUTION 分类（root-suspicious 等）→ `Invoke-Quarantine`：`Move-Item` 到**同卷**
+  隔离目录（Windows 为 `<目标盘根>\.rubbish-quarantine\run-<时间戳>\`；POSIX 回退到
+  旧位置下的按运行子目录；`-QuarantineDir` 可覆盖）。**移动 ≠ 删除**，原始文件
+  始终可移回；同卷移动消除了跨卷 `EXDEV` 静默失败。
 - 隔离目录内容永不自动删除；verify-report.ps1 会现场断言"原文件消失 + 隔离副本存在"。
 - 移动失败记 `MOVE_FAILED` + 错误消息，不中断运行。
 
@@ -70,7 +72,7 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
   才清 `Download\*` 与 `DataStore.edb.old`/`DataStore.jfm.old`，之后重启服务；
   停服务失败 → `SKIP_SERVICE_RUNNING`，跳过该步。
 
-## 8. 处置枚举（12 种 Disposition，见 lib `Get-JunkDispositions`）
+## 8. 处置枚举（13 种 Disposition，见 lib `Get-JunkDispositions`）
 
 | 枚举 | 含义 |
 |------|------|
@@ -84,6 +86,7 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
 | `SKIP_WSL_REGISTERED` | WSL 注册中的发行版目录，跳过（D 盘先例） |
 | `SKIP_ELEVATION_DENIED` | UAC 拒绝 / `-SkipElevated`，未执行 |
 | `SKIP_SERVICE_RUNNING` | 相关服务运行中（wuauserv），跳过 |
+| `SKIP_POSIX_UNSAFE` | POSIX 上默认跳过（advisory flock 不可信）；需显式 `--allow-posix-unlink` |
 | `QUARANTINED` | 已移动入隔离目录（非删除） |
 | `MOVE_FAILED` | 隔离移动失败，记录错误消息 |
 
@@ -132,8 +135,8 @@ verify-report.ps1 的 `## 5. Skipped Items Table` 按此枚举计数；任何 SK
 - **Linux/macOS 无 UAC/提升**：`elevated-system` 的 UAC 提升（`Start-Process -Verb RunAs`）
   是 Windows 专属。在 Linux/macOS 上不弹提升框，直接记 `SKIP_ELEVATION_DENIED`
   并**静默跳过**，其余清理逻辑不受影响。
-- **隔离目录位置**：Windows 用 `$env:USERPROFILE\Desktop`，其他平台改用
-  `Get-UserDocumentsDir`（见 `scripts/lib/platform.ps1`）解析用户文档目录，
-  保证隔离目录始终落在可恢复的用户目录下。
+- **隔离目录位置（同卷）**：Windows 默认在目标盘根 `X:\.rubbish-quarantine\run-<时间戳>\`
+  （与源同卷，避免跨卷 `EXDEV`）；Linux/macOS 回退到旧位置下的按运行子目录；`-QuarantineDir`
+  可显式覆盖，隔离内容始终可恢复。
 - **elevated-system 仅 Windows**：Windows 上仅系统盘 + `-Yes` 时真正执行提升批次；
   在其他平台该分支**永远不执行**（静默跳过），不产生 elevated.ps1。

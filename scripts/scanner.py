@@ -90,6 +90,101 @@ _WATCHED_PROCESSES = {
     "pip",
     "npm",
 }
+
+# FM4: category -> owner-process specs. A category whose owner process is
+# running is skipped ENTIRELY (never killed, never partially cleaned) at both
+# scan time and clean time. "jetbrains*" is a prefix match. Categories absent
+# here (root-temps, empty-dirs, ...) have no owner and are never gated.
+CATEGORY_OWNER_PROCESSES = {
+    "browser-caches": ["chrome", "msedge"],
+    "app-caches": ["wechat", "weixin", "wechatapp"],
+    "gpu-shader": [
+        "steam",
+        "wegame",
+        "epicgameslauncher",
+        "battle.net",
+        "valorant",
+        "cs2",
+        "dota2",
+        "overwatch",
+        "apexlegends",
+        "fortnite",
+        "minecraft",
+    ],
+    "dev-caches": ["pip", "npm", "python", "node"],
+    "ide-caches": ["jetbrains*", "zotero", "code"],
+    "crash-dumps": [],
+}
+
+_OWNER_DISPLAY = {
+    "chrome": "Chrome",
+    "msedge": "Edge",
+    "wechat": "微信",
+    "weixin": "微信",
+    "wechatapp": "微信",
+    "steam": "Steam",
+    "wegame": "WeGame",
+    "epicgameslauncher": "Epic Games",
+    "battle.net": "Battle.net",
+    "valorant": "Valorant",
+    "cs2": "CS2",
+    "dota2": "Dota 2",
+    "overwatch": "Overwatch",
+    "apexlegends": "Apex Legends",
+    "fortnite": "Fortnite",
+    "minecraft": "Minecraft",
+    "pip": "pip",
+    "npm": "npm",
+    "python": "Python",
+    "node": "Node.js",
+    "jetbrains*": "JetBrains IDE",
+    "zotero": "Zotero",
+    "code": "VS Code",
+}
+
+_CATEGORY_DISPLAY = {
+    "browser-caches": "浏览器缓存",
+    "app-caches": "应用缓存",
+    "gpu-shader": "GPU 着色器缓存",
+    "dev-caches": "开发工具缓存",
+    "ide-caches": "IDE 缓存",
+    "crash-dumps": "崩溃转储",
+}
+
+# FM5: execution action enum. Cache categories clean only their CONTENTS and
+# keep the directory; empty-dirs removes only verified-empty directories.
+# Everything else keeps the single-path delete/quarantine behavior.
+CATEGORY_ACTION_MAP = {
+    "app-caches": "clean_contents",
+    "browser-caches": "clean_contents",
+    "gpu-shader": "clean_contents",
+    "dev-caches": "clean_contents",
+    "ide-caches": "clean_contents",
+    "crash-dumps": "clean_contents",
+    "empty-dirs": "remove_if_empty",
+}
+
+# FM7: path semantic validation. A static-map (per-app-path-map) cache path
+# whose sampled content carries a data-file suffix looks like live user data
+# rather than junk — it is upgraded to CAUTION (quarantine), never SAFE/delete.
+# Explicitly NOT data-like: .json/.xml/.ini/.conf/.bak.
+_DATA_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".sqlitedb", ".db-shm", ".db-wal", ".index", ".dat"}
+_FM7_SIGNATURE_CATEGORIES = {
+    "app-caches",
+    "browser-caches",
+    "gpu-shader",
+    "dev-caches",
+    "ide-caches",
+    "crash-dumps",
+    "thumbnail-cache",
+}
+_FM7_CAUTION_MESSAGE = "路径语义可疑，请人工确认"
+
+# FM0: conservative default posture. Only age-gated temp/logs and verified
+# empty dirs run by default; app-owned caches and crash-dumps are opt-in via
+# an explicit --categories list.
+_CONSERVATIVE_DEFAULT_CATEGORIES = {"root-temps", "root-logs", "empty-dirs", "user-temp"}
+
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
 
 
@@ -262,9 +357,17 @@ def _find_dirs_named(root: Path, name: str) -> list[Path]:
     return sorted(found, key=_case_key)
 
 
-def _candidate(category: str, path: object, size: int, count: int) -> dict[str, Any]:
-    risk = CATEGORY_RISK_MAP[category]
-    return {
+def _candidate(
+    category: str,
+    path: object,
+    size: int,
+    count: int,
+    *,
+    risk: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> dict[str, Any]:
+    risk = risk or CATEGORY_RISK_MAP[category]
+    row = {
         "Category": category,
         "Risk": risk,
         "Path": os.fspath(path),
@@ -272,16 +375,76 @@ def _candidate(category: str, path: object, size: int, count: int) -> dict[str, 
         "FileCount": int(count),
         "Action": RISK_ACTION_MAP[risk],
     }
+    if reason:
+        row["Reason"] = reason
+    return row
+
+
+def _path_claim_key(path: object) -> str:
+    """FM6: canonical key for single-ownership claims (case-insensitive on
+    Windows via normcase, case-sensitive on POSIX)."""
+    return os.path.normcase(os.fspath(path))
+
+
+def _claimed(context: dict[str, Any]) -> set[str]:
+    return context.setdefault("claimed", set())
+
+
+def _add_candidate(context: dict[str, Any], category: str, path: object, size: int, count: int) -> None:
+    """FM6: append a candidate only if its path has not already been claimed by
+    an earlier category. Each path belongs to EXACTLY ONE category."""
+    claimed = _claimed(context)
+    key = _path_claim_key(path)
+    if key in claimed:
+        return
+    claimed.add(key)
+    context["rows"].append(_candidate(category, path, size, count))
+
+
+def _content_signature_data_like(path: Path, sample_cap: int = 20) -> bool:
+    """FM7: sample the FIRST ``sample_cap`` entries of a directory via
+    ``os.scandir`` order (if the dir has fewer, all are checked). Return True
+    when any sampled entry carries a data-file suffix. Never follows links and
+    never traverses deeper than the single scanned level."""
+    if _is_traversal_link(path) or not path.is_dir():
+        return False
+    try:
+        with os.scandir(path) as iterator:
+            for index, entry in enumerate(iterator):
+                if index >= sample_cap:
+                    break
+                try:
+                    suffix = os.path.splitext(entry.name)[1].casefold()
+                except (OSError, ValueError):
+                    continue
+                if suffix in _DATA_SUFFIXES:
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _add_file(context: dict[str, Any], category: str, path: Path) -> None:
     size = _file_size(path)
-    context["rows"].append(_candidate(category, path, size, 1))
+    _add_candidate(context, category, path, size, 1)
 
 
 def _add_directory(context: dict[str, Any], category: str, path: Path) -> None:
+    claimed = _claimed(context)
+    key = _path_claim_key(path)
+    if key in claimed:
+        return
+    # FM7: a static-map cache path whose content signature is data-like is
+    # escalated to CAUTION (quarantine) so it is never delete/clean_contents'd.
+    if category in _FM7_SIGNATURE_CATEGORIES and _content_signature_data_like(path):
+        size, count = _dir_stats(path, context, category)
+        context["rows"].append(_candidate(category, path, size, count, risk="CAUTION", reason=_FM7_CAUTION_MESSAGE))
+        claimed.add(key)
+        print(f"WARNING: {_FM7_CAUTION_MESSAGE}: {path} (risk escalated to CAUTION)", file=sys.stderr)
+        return
     size, count = _dir_stats(path, context, category)
     context["rows"].append(_candidate(category, path, size, count))
+    claimed.add(key)
 
 
 def _scan_root_temps(context: dict[str, Any]) -> None:
@@ -308,7 +471,7 @@ def _scan_root_temps(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if _is_older_than(path, context["cutoff"]):
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_root_logs(context: dict[str, Any]) -> None:
@@ -317,8 +480,10 @@ def _scan_root_logs(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         lower_name = path.name.casefold()
-        if path.suffix.casefold() in {".log", ".tmp"} or ("_install" in lower_name and lower_name.endswith(".log")):
-            context["rows"].append(_candidate(category, path, size, 1))
+        # FM6: root-logs drops *.tmp — .tmp files belong to root-temps (age
+        # gate + delete-time recheck), never to the un-gated root-logs scan.
+        if path.suffix.casefold() in {".log"} or ("_install" in lower_name and lower_name.endswith(".log")):
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_duplicate_archives(context: dict[str, Any]) -> None:
@@ -327,7 +492,7 @@ def _scan_duplicate_archives(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if path.suffix.casefold() in {".zip", ".rar", ".7z"} and (context["root"] / path.stem).is_dir():
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_empty_dirs(context: dict[str, Any]) -> None:
@@ -337,7 +502,7 @@ def _scan_empty_dirs(context: dict[str, Any]) -> None:
         if path.name.casefold() in skipped:
             continue
         if core.is_dir_empty(os.fspath(path)):
-            context["rows"].append(_candidate(category, path, 0, 0))
+            _add_candidate(context, category, path, 0, 0)
 
 
 def _scan_recycle_bin(context: dict[str, Any]) -> None:
@@ -360,7 +525,7 @@ def _scan_root_suspicious(context: dict[str, Any]) -> None:
         if path.suffix.casefold() not in {".dll", ".exe"}:
             continue
         if path.stem.casefold() not in excluded:
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_app_caches(context: dict[str, Any]) -> None:
@@ -382,7 +547,7 @@ def _scan_app_caches(context: dict[str, Any]) -> None:
     steam = root / "SteamLibrary" / "steamapps" / "common"
     for path in _list_directories(steam):
         if core.is_dir_empty(os.fspath(path)):
-            context["rows"].append(_candidate(category, path, 0, 0))
+            _add_candidate(context, category, path, 0, 0)
 
 
 def _scan_browser_caches(context: dict[str, Any]) -> None:
@@ -460,7 +625,7 @@ def _scan_ide_caches(context: dict[str, Any]) -> None:
         for path in _resume_files(files, category, context["resume_state"]):
             size = _file_size(path)
             _tick_file(context["checkpoint"], category, path, size)
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
         return
     cache = context["user_cache"]
     for product in _list_directories(cache / "JetBrains"):
@@ -505,7 +670,7 @@ def _scan_thumbnail_cache(context: dict[str, Any]) -> None:
         _tick_file(context["checkpoint"], category, path, size)
         name = path.name.casefold()
         if (name.startswith("thumbcache_") or name.startswith("iconcache_")) and name.endswith(".db"):
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_user_temp(context: dict[str, Any]) -> None:
@@ -515,7 +680,7 @@ def _scan_user_temp(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if _is_older_than(path, context["cutoff"]):
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
 
 
 def _scan_elevated_system(context: dict[str, Any]) -> None:
@@ -526,13 +691,13 @@ def _scan_elevated_system(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if _is_older_than(path, context["cutoff"]):
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
     prefetch = root / "Windows" / "Prefetch"
     for path in _resume_files(_list_files(prefetch), category, context["resume_state"]):
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if path.suffix.casefold() == ".pf" and path.name.casefold() != "layout.ini":
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
     distribution = root / "Windows" / "SoftwareDistribution"
     if distribution.is_dir() and not _is_traversal_link(distribution):
         _add_directory(context, category, distribution)
@@ -541,14 +706,14 @@ def _scan_elevated_system(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if path.suffix.casefold() == ".etl" and _is_older_than(path, context["cutoff"]):
-            context["rows"].append(_candidate(category, path, size, 1))
+            _add_candidate(context, category, path, size, 1)
     cbs = root / "Windows" / "Logs" / "CBS"
     for path in _resume_files(_list_files(cbs), category, context["resume_state"]):
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if path.name.casefold().startswith("cbspersist_") and path.suffix.casefold() == ".cab":
-            context["rows"].append(_candidate(category, path, size, 1))
-    context["rows"].append(_candidate(category, "DISM StartComponentCleanup (no /ResetBase)", 0, 0))
+            _add_candidate(context, category, path, size, 1)
+    _add_candidate(context, category, "DISM StartComponentCleanup (no /ResetBase)", 0, 0)
 
 
 _SCANNERS = {
@@ -585,7 +750,7 @@ def _parse_categories(value: object) -> Optional[list[str]]:
 
 def _applicable_categories(categories: Optional[list[str]], is_user_drive: bool, include_elevated: bool) -> list[str]:
     order = _WINDOWS_ORDER if IS_WINDOWS else _POSIX_ORDER
-    selected = set(categories) if categories is not None else set(order)
+    selected = set(categories) if categories is not None else set(_CONSERVATIVE_DEFAULT_CATEGORIES)
     user_categories = _WINDOWS_USER_CATEGORIES if IS_WINDOWS else _POSIX_USER_CATEGORIES
     result: list[str] = []
     for category in order:
@@ -700,21 +865,45 @@ def _write_outputs(run_dir: Path, new_rows: list[dict[str, Any]], evaluated: lis
     return combined, report
 
 
-def _process_names() -> list[str]:
-    names: list[str] = []
+def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
+    """Return the lowercased stem of every currently running process name."""
+    stems: set[str] = set()
+    iter_func = process_iter or psutil.process_iter
     try:
-        processes = psutil.process_iter(["name"])
+        processes = iter_func(["name"])
         for process in processes:
             try:
                 name = str(process.info.get("name") or "")
             except (psutil.Error, OSError):
                 continue
-            stem = Path(name).stem.casefold()
-            if stem in _WATCHED_PROCESSES and name not in names:
-                names.append(name)
+            stems.add(Path(name).stem.casefold())
     except (psutil.Error, OSError):
         pass
-    return names
+    return stems
+
+
+def _process_spec_matches(spec: str, stems: set[str]) -> bool:
+    """Whether a running stem satisfies an owner spec (``jetbrains*`` prefix)."""
+    if spec.endswith("*"):
+        prefix = spec[:-1].casefold()
+        return any(stem.startswith(prefix) for stem in stems)
+    return spec.casefold() in stems
+
+
+def _owners_running(category: str, stems: set[str]) -> list[str]:
+    """Return the owner-process specs of *category* that are currently running."""
+    owners = CATEGORY_OWNER_PROCESSES.get(category) or []
+    return [spec for spec in owners if _process_spec_matches(spec, stems)]
+
+
+def _fm4_skip_message(category: str, owners: Sequence[str]) -> str:
+    display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in owners}))
+    category_display = _CATEGORY_DISPLAY.get(category, category)
+    return f"检测到 {display} 运行中，{category_display}清理已跳过。关闭后重跑该类别即可。"
+
+
+def _process_names() -> list[str]:
+    return sorted(stem for stem in _snapshot_process_stems() if stem in _WATCHED_PROCESSES)
 
 
 def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
@@ -798,14 +987,24 @@ def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
         "posix_crash_dir": Path(kwargs.get("posix_crash_dir") or "/var/crash"),
         "cutoff": datetime.now() - timedelta(days=7),
         "rows": [],
+        "claimed": set(),
         "checkpoint": checkpoint,
         "resume_state": resume_state,
     }
 
     evaluated: list[str] = []
+    dry_run = bool(kwargs.get("dry_run", False))
+    running_stems = _snapshot_process_stems(process_iter=kwargs.get("process_iter"))
     completed_set = {str(category).casefold() for category in completed}
     for category in applicable:
         if category.casefold() in completed_set:
+            continue
+        # FM4 scan-time gate: an owner process running now skips the whole
+        # category so its candidates are never generated (and never reach
+        # clean_contents later). Never gates elevated-system.
+        owners = [] if category == "elevated-system" else _owners_running(category, running_stems)
+        if owners:
+            print(f"SKIP: {_fm4_skip_message(category, owners)}")
             continue
         evaluated.append(category)
         checkpoint["fileCounter"] = 0
@@ -813,6 +1012,9 @@ def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
         _complete_category(checkpoint, category)
 
     combined_rows, report = _write_outputs(run_dir, context["rows"], applicable)
+    if dry_run:
+        for row in combined_rows:
+            print(f"DRY-RUN: {row['Category']} | {row['SizeBytes']} bytes | {row['Path']} | {row['Action']}")
     return {
         "drive": drive,
         "run_dir": os.fspath(run_dir),
@@ -838,6 +1040,8 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace, out_dir: Path) -
         command.extend(["-Categories", arguments.Categories])
     if arguments.Resume:
         command.append("-Resume")
+    if getattr(arguments, "dry_run", False):
+        command.append("--dry-run")
     return command
 
 
@@ -898,6 +1102,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-Resume", action="store_true")
     parser.add_argument("-Parallel", action="store_true")
     parser.add_argument("-Throttle", type=int, default=4)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="print a per-file preview of every candidate without deleting anything",
+    )
     return parser
 
 
@@ -916,6 +1126,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             include_elevated=arguments.IncludeElevated,
             categories=arguments.Categories,
             resume=arguments.Resume,
+            dry_run=getattr(arguments, "dry_run", False),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

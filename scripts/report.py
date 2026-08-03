@@ -22,6 +22,10 @@ if __package__ in (None, ""):
 
 from scripts.lib import core, platform
 
+# FM9 alignment: reuse cleaner.py's same-volume quarantine resolution so a
+# standalone report default never assumes a cross-volume Desktop location.
+from scripts.cleaner import _default_quarantine_dir
+
 
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
 _PREFLIGHT_LINE = re.compile(r"^([A-Za-z_]+)=(.*)$")
@@ -914,11 +918,11 @@ def verify_report(drive: str, **kwargs: Any) -> dict[str, Any]:
     candidates = _read_candidates(candidates_path) if candidates_path.is_file() else []
     categories = _category_statistics(candidates, disposition_by_path, scan_only=scan_only)
 
+    # FM9: consume cleaner.py's resolved quarantine dir (same-volume default,
+    # X:\.rubbish-quarantine\run-<ts>) instead of assuming a cross-volume
+    # Desktop location. An explicit quarantine_dir / -QuarantineDir still wins.
     quarantine_value = kwargs.get("quarantine_dir")
-    quarantine_dir = Path(
-        quarantine_value
-        or (Path.home() / "Desktop" / ".omo" / "quarantine" / _drive_id(drive))
-    )
+    quarantine_dir = Path(quarantine_value or _default_quarantine_dir(drive))
     assertions = _assertion_rows(cleanup_rows, quarantine_dir)
     pass_count = sum(item["result"] == "PASS" for item in assertions)
     fail_count = sum(item["result"] == "FAIL" for item in assertions)

@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.1.0] - 2026-08-03
+
+Safety hardening release. A post-mortem of a cross-volume quarantine incident
+identified nine failure modes (FM1–FM9, full analysis in
+[references/incident-rca.md](references/incident-rca.md)); all are fixed and
+covered by regression tests.
+
+### Added
+
+- Conservative default posture (FM0): without `-Categories`, scan/clean processes only age-gated temp files,
+  logs, and verified-empty directories; app-owned caches and crash dumps are opt-in.
+- `--dry-run` preview on both [`scripts/scanner.py`](scripts/scanner.py) and [`scripts/cleaner.py`](scripts/cleaner.py):
+  prints a per-file preview of every deletion without touching any file.
+- Process-awareness gate (FM4): categories whose owner application is running (Chrome, Steam, WeChat, ...)
+  are skipped with a clear message and never auto-killed; `--close-apps` prompts the user to close them instead.
+- Fixed-drive filter (FM8): only fixed local drives are eligible — removable, CD/DVD, and network drives are excluded.
+
+### Changed
+
+- POSIX unlink is default-skip (FM1): files that cannot be safely unlinked are recorded as `SKIP_POSIX_UNSAFE`
+  without probing; opt in explicitly with `--allow-posix-unlink`.
+- Quarantine runs the same lock probe as delete (FM2): a locked file is never moved.
+- The elevated system batch is generated from approved candidate rows only, applies a `forfiles` age gate,
+  and restarts the `wuauserv` service afterwards (FM3).
+- Dual-action execution (FM5): cache categories use `clean_contents` (files inside deleted, directory kept);
+  `empty-dirs` uses `remove_if_empty` (only verified-empty directories).
+- Taxonomy mutual exclusion (FM6): categories no longer overlap on the same paths.
+- Data-signature validation (FM7): a static-map cache directory whose sampled content does not match the
+  expected signature is escalated to `CAUTION` and quarantined, never `clean_contents`'d in place.
+- Same-volume quarantine default (FM9): quarantined files move under `X:\.rubbish-quarantine\run-<timestamp>\`
+  on the source volume — cross-volume `EXDEV` `MOVE_FAILED` failures are eliminated. [`scripts/report.py`](scripts/report.py)
+  consumes the same resolution instead of assuming a Desktop quarantine.
+
+### Fixed
+
+- FM1–FM9 safety findings from the [incident RCA](references/incident-rca.md): POSIX flock gap, quarantine lock
+  bypass, elevated batch force-delete, missing process awareness, directory-vs-file mismatch, category overlap,
+  stale path map, removable drives, and cross-volume quarantine `EXDEV`.
+
+### Testing
+
+- Added FM0–FM9 plus FM13 regression coverage in [`tests/test_safety_fm.py`](tests/test_safety_fm.py)
+  (57 assertions total across all suites).
+
 ## [v2.0.0] - 2026-08-01
 
 ### Changed

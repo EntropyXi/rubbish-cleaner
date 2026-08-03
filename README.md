@@ -16,6 +16,7 @@ The core user-facing documents listed below are maintained in English and Simpli
 - [references/junk-taxonomy.md](references/junk-taxonomy.md) ↔ [references/junk-taxonomy_zh.md](references/junk-taxonomy_zh.md)
 - [references/per-app-path-map.md](references/per-app-path-map.md) ↔ [references/per-app-path-map_zh.md](references/per-app-path-map_zh.md)
 - [references/safety-rules.md](references/safety-rules.md) ↔ [references/safety-rules_zh.md](references/safety-rules_zh.md)
+- [references/incident-rca.md](references/incident-rca.md) ↔ [references/incident-rca_zh.md](references/incident-rca_zh.md) (v2.1.0 safety-incident post-mortem, FM1–FM9)
 
 ## Quick Start
 
@@ -55,9 +56,9 @@ Prompt examples:
 2. `/rubbish-cleaner Clean drive D: - remove temporary files and app caches selected by the built-in rules, but skip anything in D:\Downloads and D:\Games.`
 3. `/rubbish-cleaner What junk is on E:? Only list browser caches and logs.`
 
-The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; files that Windows reports as locked are skipped, while POSIX may unlink an open file according to native filesystem semantics) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`). Windows stores this under the Desktop as before; Linux/macOS use `$HOME/.omo/`.
+The flow the agent follows: scan (read-only inventory) → shows you the categorized candidates with sizes → waits for your approval → cleans safely (quarantine = move to a backup folder, never permanent delete; files that Windows reports as locked are skipped, while POSIX defaults to skip files that cannot be safely unlinked, opt-in only via `--allow-posix-unlink`) → verifies and writes a summary report (`.omo\evidence\rubbish-cleaner\` run folder, `summary.md`). Windows stores this under the Desktop as before; Linux/macOS use `$HOME/.omo/`.
 
-Safety: everything is per-drive and per-run scoped; nothing is permanently deleted (quarantined); each deletion is re-verified right before it happens; junction-aware; UAC-elevated system cleanup is optional and skip-if-denied.
+Safety: a conservative default posture means app-owned caches and crash dumps are opt-in (pass `-Categories` to include them); `--dry-run` prints a per-file preview of every deletion without touching anything, so preview before you clean. Cleanup is per-drive and per-run scoped; nothing is permanently deleted (quarantined); each deletion is re-verified right before it happens; junction-aware; process-aware (categories whose owner app is running are skipped, never force-killed); quarantined files move to the same volume (`X:\.rubbish-quarantine\run-<timestamp>\` on Windows) so nothing crosses drives; UAC-elevated system cleanup is optional and skip-if-denied.
 
 ## What it cleans
 
