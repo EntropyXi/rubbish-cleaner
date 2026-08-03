@@ -51,6 +51,7 @@ def test_safe_delete_requires_approval_then_removes_and_records_ok(tmp_path=None
         candidates_csv=candidates,
         yes=True,
         quarantine_dir=root / "quarantine",
+        allow_posix_unlink=True,
         is_user_drive=False,
         is_system_drive=False,
     )
@@ -69,7 +70,10 @@ def test_locked_gate_preserves_file_and_records_skip_locked(tmp_path=None):
     original = cleaner.core.test_file_locked
     cleaner.core.test_file_locked = lambda path: True
     try:
-        disposition = cleaner._process_row(row, "root-logs", csv_path, root / "quarantine")
+        disposition = cleaner._process_row(
+            row, "root-logs", csv_path, root / "quarantine",
+            allow_posix_unlink=True,
+        )
     finally:
         cleaner.core.test_file_locked = original
     assert disposition == "SKIP_LOCKED"
@@ -102,6 +106,7 @@ def test_quarantine_action_moves_item_and_non_empty_directory_is_not_removed(tmp
         candidates_csv=candidates,
         yes=True,
         quarantine_dir=quarantine_dir,
+        allow_posix_unlink=True,
         is_user_drive=False,
         is_system_drive=False,
     )
@@ -153,6 +158,7 @@ def test_category_approval_mapping_is_case_insensitive(tmp_path=None):
         candidates_csv=candidates,
         approvals={"ROOT-LOGS": True},
         quarantine_dir=root / "quarantine",
+        allow_posix_unlink=True,
         is_user_drive=False,
         is_system_drive=False,
     )

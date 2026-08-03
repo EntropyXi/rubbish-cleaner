@@ -427,7 +427,8 @@ def test_fm4_process_stopped_cleans_normally(tmp_path=None):
     with _mock_running(cleaner, []):
         result, _ = _run_with_stdout(lambda: cleaner.clean(
             "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
-            quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+            quarantine_dir=root / "quarantine", allow_posix_unlink=True,
+            is_user_drive=False, is_system_drive=False,
         ))
 
     assert not files[0].exists(), "FM4 regression: stopped-app cache contents should be cleaned"
@@ -469,7 +470,8 @@ def test_fm5_clean_contents_keeps_directory(tmp_path=None):
     with _mock_running(cleaner, []):
         result, _ = _run_with_stdout(lambda: cleaner.clean(
             "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
-            quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+            quarantine_dir=root / "quarantine", allow_posix_unlink=True,
+            is_user_drive=False, is_system_drive=False,
         ))
 
     assert cache.exists(), "FM5 regression: clean_contents must keep the directory"
@@ -497,7 +499,8 @@ def test_fm5_remove_if_empty_only_empty(tmp_path=None):
 
     result, _ = _run_with_stdout(lambda: cleaner.clean(
         "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
-        quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+        quarantine_dir=root / "quarantine", allow_posix_unlink=True,
+        is_user_drive=False, is_system_drive=False,
     ))
 
     assert not empty.exists(), "FM5 regression: verified-empty dir must be removed"
@@ -701,7 +704,8 @@ def test_fm9_quarantine_custom_dir_override(tmp_path=None):
         with _mock_running(cleaner, []):
             result, _ = _run_with_stdout(lambda: cleaner.clean(
                 "D:", volume=_volume(root), candidates_csv=candidates, yes=True,
-                quarantine_dir=custom, is_user_drive=False, is_system_drive=False,
+                quarantine_dir=custom, allow_posix_unlink=True,
+                is_user_drive=False, is_system_drive=False,
             ))
     finally:
         cleaner.IS_WINDOWS = old_is_windows
@@ -867,7 +871,8 @@ def test_fm7_caution_row_is_quarantined_not_clean_contents(tmp_path=None):
     with _mock_running(cleaner, []):
         result, _ = _run_with_stdout(lambda: cleaner.clean(
             "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
-            quarantine_dir=quarantine_dir, is_user_drive=False, is_system_drive=False,
+            quarantine_dir=quarantine_dir, allow_posix_unlink=True,
+            is_user_drive=False, is_system_drive=False,
         ))
 
     assert not cache.exists(), "FM7 x FM5: data-like cache dir must not be cleaned in place"
@@ -905,7 +910,8 @@ def test_fm7_mixed_safe_and_caution_rows_in_category(tmp_path=None):
     with _mock_running(cleaner, []):
         result, _ = _run_with_stdout(lambda: cleaner.clean(
             "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
-            quarantine_dir=quarantine_dir, is_user_drive=False, is_system_drive=False,
+            quarantine_dir=quarantine_dir, allow_posix_unlink=True,
+            is_user_drive=False, is_system_drive=False,
         ))
 
     by_path = {item["Path"]: item["Disposition"] for item in result["dispositions"]}
