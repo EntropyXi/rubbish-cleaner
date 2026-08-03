@@ -174,6 +174,23 @@ def _size_of(path: str) -> int:
         return 0
 
 
+def _preview_line(
+    path: object,
+    size: int,
+    category: str,
+    action: str,
+    reason: str = "",
+) -> str:
+    """FM13: uniform per-file dry-run preview line.
+
+    Format: ``path | size | category | action | reason`` so the ``--dry-run``
+    output doubles as a real preview diff the user can review before approving
+    any category.
+    """
+    base = f"DRY-RUN: {path} | {size} bytes | {category} | {action}"
+    return f"{base} | {reason}" if reason else base
+
+
 def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
     """Return the lowercased stem of every currently running process name."""
     stems: set[str] = set()
@@ -376,6 +393,48 @@ def _record(
     return disposition
 
 
+def _skip_reasons(csv_path: Path) -> dict[tuple[str, str], str]:
+    """Map (Path, Disposition) -> ErrorMessage from the cleanup audit CSV."""
+    reasons: dict[tuple[str, str], str] = {}
+    try:
+        with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
+            for row in csv.DictReader(stream, delimiter="|"):
+                reasons[(row.get("Path", ""), row.get("Disposition", ""))] = row.get(
+                    "ErrorMessage", ""
+                )
+    except OSError:
+        return {}
+    return reasons
+
+
+def _print_clean_report(
+    dispositions: Sequence[dict[str, str]],
+    csv_path: Path,
+    *,
+    dry_run: bool,
+) -> None:
+    """FM13: post-clean report lists deleted + skipped + reasons."""
+    if not dispositions:
+        return
+    counts: dict[str, int] = {}
+    skipped: list[dict[str, str]] = []
+    for item in dispositions:
+        disposition = item["Disposition"]
+        counts[disposition] = counts.get(disposition, 0) + 1
+        if disposition not in {"OK", "QUARANTINED", "DRY_RUN"}:
+            skipped.append(item)
+    print(f"REPORT: {len(dispositions)} item(s) processed, {len(skipped)} skipped")
+    for disposition in sorted(counts):
+        print(f"  {disposition}: {counts[disposition]}")
+    if not skipped:
+        return
+    reasons = {} if dry_run or not csv_path.is_file() else _skip_reasons(csv_path)
+    for item in skipped[:10]:
+        reason = reasons.get((item["Path"], item["Disposition"]), "")
+        suffix = f" ({reason})" if reason else ""
+        print(f"  SKIP {item['Path']} -> {item['Disposition']}{suffix}")
+
+
 def _has_traversal_link(path: str) -> bool:
     try:
         core._assert_no_traversal_components(path)
@@ -428,7 +487,7 @@ def _clean_contents(
     if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
         message = "re-verify failed: directory is missing or a traversal link"
         if dry_run:
-            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | clean_contents ({message})")
+            print(_preview_line(target_dir, 0, category, "clean_contents", message))
             return "DRY_RUN"
         return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
     if not dry_run and _owners_running(category, running_stems):
@@ -444,8 +503,13 @@ def _clean_contents(
     if dry_run:
         for file_path in _iter_regular_files(target):
             print(
-                f"DRY-RUN: {category} | {_size_of(str(file_path))} bytes | "
-                f"{file_path} | clean_contents (keeps directory)"
+                _preview_line(
+                    file_path,
+                    _size_of(str(file_path)),
+                    category,
+                    "clean_contents",
+                    "keeps directory",
+                )
             )
         return "DRY_RUN"
 
@@ -491,12 +555,12 @@ def _remove_if_empty(category: str, target_dir: str, csv_path: Path, *, dry_run:
     if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
         message = "re-verify failed: directory is missing or a traversal link"
         if dry_run:
-            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty ({message})")
+            print(_preview_line(target_dir, 0, category, "remove_if_empty", message))
             return "DRY_RUN"
         return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
     if not core.is_dir_empty(target_dir):
         if dry_run:
-            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty (SKIP_NOT_EMPTY)")
+            print(_preview_line(target_dir, 0, category, "remove_if_empty", "SKIP_NOT_EMPTY"))
             return "DRY_RUN"
         return _record(
             csv_path,
@@ -507,7 +571,7 @@ def _remove_if_empty(category: str, target_dir: str, csv_path: Path, *, dry_run:
             "re-verify failed: directory is not empty",
         )
     if dry_run:
-        print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty (verified empty)")
+        print(_preview_line(target_dir, 0, category, "remove_if_empty", "verified empty"))
         return "DRY_RUN"
     return core.safe_remove(target_dir, category, os.fspath(csv_path))
 
@@ -592,7 +656,7 @@ def _process_row(
 
     if _has_traversal_link(target):
         if dry_run:
-            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action} (SKIP_JUNCTION)")
+            print(_preview_line(target, _size_of(target), category, action, "SKIP_JUNCTION"))
             return "DRY_RUN"
         return _record(
             csv_path,
@@ -624,7 +688,7 @@ def _quarantine_path(
     """
     if _has_traversal_link(target):
         if dry_run:
-            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | quarantine (SKIP_JUNCTION)")
+            print(_preview_line(target, _size_of(target), category, "quarantine", "SKIP_JUNCTION"))
             return "DRY_RUN"
         return _record(
             csv_path,
@@ -635,7 +699,7 @@ def _quarantine_path(
             "refusing a symlink, junction, or linked ancestor",
         )
     if dry_run:
-        print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | quarantine")
+        print(_preview_line(target, _size_of(target), category, "quarantine"))
         return "DRY_RUN"
     if os.path.isfile(target):
         if category in _TEMP_CATEGORIES:
@@ -695,7 +759,7 @@ def _single_path_remove(
     """
     if _has_traversal_link(target):
         if dry_run:
-            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action} (SKIP_JUNCTION)")
+            print(_preview_line(target, _size_of(target), category, action, "SKIP_JUNCTION"))
             return "DRY_RUN"
         return _record(
             csv_path,
@@ -706,7 +770,7 @@ def _single_path_remove(
             "refusing a symlink, junction, or linked ancestor",
         )
     if dry_run:
-        print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action}")
+        print(_preview_line(target, _size_of(target), category, action))
         return "DRY_RUN"
     if os.path.isdir(target):
         if not core.is_dir_empty(target):
@@ -790,8 +854,17 @@ def _category_approved(
         return explicit
     if risk == "ASK":
         return False
+    file_count = sum(int(row["FileCount"]) for _, row in entries)
     total = sum(int(row["SizeBytes"]) for _, row in entries)
+    size_mb = total / (1024 * 1024)
     print(f"SUMMARY: category {category} - {len(entries)} item(s), {total} byte(s)")
+    # FM13: the confirmation shows what will actually be deleted - N files /
+    # X MB - plus the first few rows as short (basename-only) patterns so the
+    # user can see real targets without leaking full paths.
+    print(f"将删除 {file_count} 个文件 / {size_mb:.1f} MB")
+    for _, row in entries[:3]:
+        short = os.path.basename(row["Path"]) or row["Path"]
+        print(f"  - {short} ({row['Risk']}/{row['Action']})")
     try:
         answer = input_func(f"Clean category {category}? (y/n)")
     except EOFError:
@@ -1088,6 +1161,9 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                 completed.append(category)
             if not dry_run:
                 _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
+
+    # FM13: post-clean report lists deleted + skipped + reasons.
+    _print_clean_report(dispositions, cleanup_csv, dry_run=dry_run)
 
     return {
         "drive": drive,
