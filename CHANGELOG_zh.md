@@ -4,6 +4,46 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [v2.1.0] - 2026-08-03
+
+安全加固版本。一次跨卷隔离事故的事后分析识别出九个故障模式（FM1–FM9，完整分析见
+[references/incident-rca_zh.md](references/incident-rca_zh.md)）；所有故障均已修复并配有回归测试。
+
+### 新增
+
+- 保守默认姿态（FM0）：未指定 `-Categories` 时，扫描/清理只处理按时效门限的临时文件、日志和验证过的空目录；
+  应用缓存与崩溃转储改为显式开启。
+- [`scripts/scanner.py`](scripts/scanner.py) 与 [`scripts/cleaner.py`](scripts/cleaner.py) 均支持
+  `--dry-run` 预览：逐文件打印将要删除的内容，不触碰任何文件。
+- 进程感知门（FM4）：若某分类的属主应用正在运行（Chrome、Steam、微信等），整类跳过并给出明确提示，
+  **绝不自动结束进程**；`--close-apps` 改为提示用户自行关闭。
+- 固定盘过滤（FM8）：只处理固定本地盘 — 可移动盘、CD/DVD 与网络盘一律排除。
+
+### 变更
+
+- POSIX unlink 默认跳过（FM1）：无法安全 unlink 的文件记为 `SKIP_POSIX_UNSAFE`，不再探测；
+  需通过 `--allow-posix-unlink` 显式放开。
+- 隔离与删除走相同的锁探测（FM2）：被锁定的文件不会被移动。
+- 提升系统批次由已批准的候选行驱动，加入 `forfiles` 时效门，并在之后重启 `wuauserv` 服务（FM3）。
+- 双动作执行（FM5）：缓存分类使用 `clean_contents`（删除目录内文件、保留目录）；
+  `empty-dirs` 使用 `remove_if_empty`（仅删除验证过为空的目录）。
+- 分类互斥（FM6）：分类之间不再在同一路径上重叠。
+- 数据签名校验（FM7）：静态映射缓存目录的抽样内容与预期不符时升级为 `CAUTION` 并隔离，绝不原地
+  `clean_contents`。
+- 同卷隔离默认（FM9）：隔离文件移动到源卷 `X:\.rubbish-quarantine\run-<时间戳>\` 下 —
+  消除了跨卷 `EXDEV` 导致的静默 `MOVE_FAILED`。[`scripts/report.py`](scripts/report.py) 也采用相同的解析
+  逻辑，不再假定桌面隔离目录。
+
+### 修复
+
+- 修复 [事故 RCA](references/incident-rca_zh.md) 中的 FM1–FM9 安全发现：POSIX flock 缺口、隔离锁绕过、
+  提升批次强制删除、缺少进程感知、目录与文件动作不匹配、分类重叠、过期路径映射、可移动盘、跨卷隔离 `EXDEV`。
+
+### 测试
+
+- 在 [`tests/test_safety_fm.py`](tests/test_safety_fm.py) 中新增 FM0–FM9 与 FM13 回归覆盖
+  （全部套件共 57 条断言）。
+
 ## [v2.0.0] - 2026-08-01
 
 ### 变更

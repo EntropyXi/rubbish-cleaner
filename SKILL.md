@@ -68,16 +68,26 @@ multi-volume scans with independent run directories.
 
 1. Cleanup processes only rows in the scan's `candidates.csv`; it never walks
    arbitrary paths supplied outside the scan output.
-2. Every path is checked immediately before mutation. Junctions, Windows
+2. Conservative default posture: without `-Categories`, only age-gated temp
+   files, logs, and verified-empty directories are processed; app-owned caches
+   and crash dumps are opt-in.
+3. Every path is checked immediately before mutation. Junctions, Windows
    reparse points, and POSIX symbolic links are not traversed.
-3. CAUTION items are moved to a per-drive quarantine; they are never permanently
+4. CAUTION items are moved to a per-drive quarantine; they are never permanently
    deleted. SAFE items are deleted only after the same approval gate.
-4. Files newer than seven days are skipped. Windows-locked files are recorded
-   as `SKIP_LOCKED`; POSIX may unlink an open file according to native filesystem
-   semantics, and records the actual result.
-5. User documents, installed programs, system component stores, pagefile and
+5. Files newer than seven days are skipped. Windows-locked files are recorded
+   as `SKIP_LOCKED`. POSIX defaults to skipping files that cannot be safely
+   unlinked (`SKIP_POSIX_UNSAFE`) without probing; opt in explicitly with
+   `--allow-posix-unlink`. Scheduled POSIX cron/launchd tasks do not pass that
+   flag, so scheduled cleanup is scan-only on Linux/macOS.
+6. Process-awareness gate: a category whose owner application is running (e.g.
+   Chrome, Steam, WeChat) is skipped with a clear message — applications are
+   never auto-killed. `--close-apps` prompts the user to close them instead.
+7. `--dry-run` prints a per-file preview of every deletion without touching any
+   file; run it before any real cleanup run.
+8. User documents, installed programs, system component stores, pagefile and
    hibernation files, and protected application data are never cleanup targets.
-6. Elevated system cleanup is Windows-only. On Linux/macOS it is skipped with
+9. Elevated system cleanup is Windows-only. On Linux/macOS it is skipped with
    `SKIP_ELEVATION_DENIED` and the normal cleanup continues.
 
 ## Categories and evidence

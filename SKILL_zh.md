@@ -55,14 +55,20 @@ python scripts/scanner.py -Drive X: -Categories root-temps,root-logs
 drive cleanup、cache cleanup、clean temp files 时触发。扫描为只读（不删除任何东西），
 可安全运行。
 
-## 3. 铁律（5 条，完整护栏见 [safety-rules.md](references/safety-rules.md)）
+## 3. 铁律（完整护栏见 [safety-rules.md](references/safety-rules.md)）
 
 1. **只删扫描结果**：cleaner.py 只处理 candidates.csv 列出的行，CSV 之外一律不碰。
-2. **-LiteralPath + junction 感知**：绝不用裸 `-Path`/裸 `-Recurse`（PS 5.1 的
-   `-Recurse` 会跟随 NTFS junction）。
-3. **遵循文件系统锁语义**：Windows 报告为锁定的文件记 `SKIP_LOCKED`；POSIX 允许 unlink 打开中的文件。任何平台都不强杀进程。
-4. **7 天规则**：临时文件只删 7 天以前的；删除前立即重验。
-5. **隔离即移动**：CAUTION 项（根目录 dll/exe）Move-Item 到隔离目录，永不删除。
+2. **保守默认（FM0）**：不带 `-Categories` 时只处理按时效门限的临时文件、日志与验证过的空目录；
+   应用缓存与崩溃转储为显式开启。
+3. **-LiteralPath + junction 感知**：绝不用裸 `-Path`/裸 `-Recurse`（会跟随 NTFS junction）。
+4. **遵循文件系统锁语义**：Windows 锁定的文件记 `SKIP_LOCKED`；POSIX **默认跳过**无法安全 unlink 的
+   文件（`SKIP_POSIX_UNSAFE`），需 `--allow-posix-unlink` 显式放开。任何平台都不强杀进程。
+5. **进程感知（FM4）**：属主应用正在运行的分类整类跳过并明确提示，**绝不自动结束进程**；
+   `--close-apps` 改为提示用户自行关闭。
+6. **7 天规则**：临时文件只删 7 天以前的；删除前立即重验。
+7. **隔离即移动（FM9）**：CAUTION 项移动到**同卷**隔离目录（Windows 为
+   `X:\.rubbish-quarantine\run-<时间戳>\`，POSIX 回退到旧位置下的按运行子目录），永不删除。
+8. **先预览再执行（FM13）**：`--dry-run` 逐文件打印预览，不触碰任何文件；真实清理前先跑一次。
 
 ## 4. 工作流
 
@@ -116,7 +122,8 @@ python scripts/report.py -Drive X: -RunDir <run>
   - `preflight.txt`（基线空闲字节）、`candidates.csv`（候选）、`scan-report.json`（分类报告）
   - `cleanup-errors.csv`（清理处置 CSV）、`summary.md`（验证报告，8 个 `##` 节）
   - elevated 运行时：`elevated` 批处理 + `elevated-result.txt`
-- 隔离目录：对应 `.omo/quarantine/<盘符>/`（可恢复）
+- 隔离目录：**同卷** `X:\.rubbish-quarantine\run-<时间戳>\`（Windows），POSIX 回退到旧位置下的按运行
+  子目录；`-QuarantineDir` 可覆盖。内容可恢复，永不自动删除。
 
 ## 7. MUST NOT 清单（红线）
 

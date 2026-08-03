@@ -22,6 +22,7 @@
 - [references/junk-taxonomy.md](references/junk-taxonomy.md) ↔ [references/junk-taxonomy_zh.md](references/junk-taxonomy_zh.md)
 - [references/per-app-path-map.md](references/per-app-path-map.md) ↔ [references/per-app-path-map_zh.md](references/per-app-path-map_zh.md)
 - [references/safety-rules.md](references/safety-rules.md) ↔ [references/safety-rules_zh.md](references/safety-rules_zh.md)
+- [references/incident-rca.md](references/incident-rca.md) ↔ [references/incident-rca_zh.md](references/incident-rca_zh.md)（v2.1.0 安全事故事后分析，FM1–FM9）
 
 ## 快速开始
 
@@ -63,7 +64,7 @@ python scripts/install.py --target all
 
 agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分类候选清单 → 等待你批准 → 安全清理（隔离 = 移动到备份目录，绝不永久删除；Windows 报告为锁定的文件会跳过，Linux/macOS 则默认跳过无法安全 unlink 的文件，仅可通过 `--allow-posix-unlink` 显式放开）→ 校验并写入汇总报告（`.omo\evidence\rubbish-cleaner\` 运行目录下的 `summary.md`）。
 
-安全要点：一切按盘符、按运行批次隔离作用域；没有任何东西被永久删除（全部隔离）；每次删除前都会重新校验；支持 junction 感知；UAC 提升的系统清理是可选的，拒绝即跳过。
+安全要点：默认采用**保守姿态**，应用缓存与崩溃转储为显式开启（传 `-Categories` 才包含）；`--dry-run` 逐文件预览所有将要执行的删除而不触碰任何文件，清理前先预览。一切按盘符、按运行批次隔离作用域；没有任何东西被永久删除（全部隔离）；每次删除前都会重新校验；支持 junction 感知；**进程感知**——属主应用正在运行的分类会被跳过、绝不强杀进程；隔离文件移动到**同卷**（Windows 为 `X:\.rubbish-quarantine\run-<时间戳>\`），不跨盘移动；UAC 提升的系统清理是可选的，拒绝即跳过。
 
 ## 清理范围
 
