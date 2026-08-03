@@ -946,10 +946,16 @@ def test_fm13_dry_run_per_file_preview(tmp_path=None):
     for file_path in files:
         line = next(line for line in out.splitlines() if str(file_path) in line)
         assert "DRY-RUN:" in line
-        assert str(file_path) in line, "FM13: preview line must contain the path"
+        # FM13: the line leads with the path, then size | category | action |
+        # reason. Pre-fix the category led the line and the action trailed in
+        # parens — this order assertion fails on the old format.
+        assert line.startswith(f"DRY-RUN: {file_path} |"), (
+            "FM13: preview line must lead with the path, got: " + line
+        )
         assert "bytes" in line, "FM13: preview line must contain the size"
         assert "browser-caches" in line, "FM13: preview line must contain the category"
         assert "clean_contents" in line, "FM13: preview line must contain the action"
+        assert "| keeps directory" in line, "FM13: preview line must carry the reason field"
     assert all(file_path.exists() for file_path in files), "FM13: dry-run must not delete"
     assert all(item["Disposition"] == "DRY_RUN" for item in result["dispositions"])
     assert not (root / "cleanup-errors.csv").exists(), "FM13: dry-run must not mutate run outputs"
