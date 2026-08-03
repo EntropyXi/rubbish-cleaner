@@ -20,6 +20,10 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
 - FM0: the default scan/clean posture is conservative (no app-owned caches),
   explicit ``--categories`` re-includes them, ``--dry-run`` previews without
   deleting, and the policy JSONs parse with a conservative safe profile.
+- FM9: the default quarantine dir resolves onto the SAME drive as the source
+  (``X:\\.rubbish-quarantine\\run-<ts>`` on Windows), so ``core.quarantine``
+  never crosses a volume boundary (no EXDEV -> no silent ``MOVE_FAILED``);
+  an explicit ``-QuarantineDir`` still wins over the same-volume default.
 """
 
 from __future__ import annotations
@@ -617,3 +621,78 @@ def test_fm0_policy_jsons_conservative_safe_and_aggressive(tmp_path=None):
     assert "browser-caches" in aggressive["categories"]
     assert "crash-dumps" in aggressive["categories"]
     assert "recycle-bin" not in aggressive["categories"], "FM0: aggressive still excludes recycle-bin"
+
+
+# --------------------------------------------------------------------------- #
+# FM9 — same-volume quarantine (no cross-volume EXDEV / MOVE_FAILED)
+# --------------------------------------------------------------------------- #
+
+def test_fm9_same_volume_quarantine(tmp_path=None):
+    """FM9: the DEFAULT quarantine dir resolves onto the SOURCE drive and the
+    move succeeds — a same-volume move never raises EXDEV / MOVE_FAILED."""
+    root = _tmp_path(tmp_path)
+    old_is_windows = cleaner.IS_WINDOWS
+    cleaner.IS_WINDOWS = True
+    try:
+        quarantine = cleaner._default_quarantine_dir("D:")
+    finally:
+        cleaner.IS_WINDOWS = old_is_windows
+
+    # FM9: the default must live on the source drive (same volume), NOT on the
+    # system/Desktop volume — that is exactly the cross-device case that used
+    # to fail silently with MOVE_FAILED.
+    assert str(quarantine).startswith("D:" + os.sep), (
+        f"FM9 regression: default quarantine must resolve to the drive ROOT "
+        f"(D:{os.sep}.rubbish-quarantine...), got {quarantine}"
+    )
+    assert ".rubbish-quarantine" in quarantine.parts, (
+        f"FM9 regression: default quarantine must live under .rubbish-quarantine, got {quarantine}"
+    )
+    assert quarantine.name.startswith("run-"), "FM9: default quarantine is per-run scoped"
+
+    # A source and its quarantine dir on the SAME volume move cleanly.
+    fake_drive = root / "D"
+    fake_drive.mkdir()
+    source = fake_drive / "suspect.tmp"
+    source.write_text("payload", encoding="utf-8")
+    csv_path = root / "cleanup.csv"
+    quarantine_dir = fake_drive / ".rubbish-quarantine" / "run-test"
+    disposition = cleaner.core.quarantine(
+        str(source), str(quarantine_dir), "root-suspicious", str(csv_path)
+    )
+    assert disposition == "QUARANTINED", (
+        f"FM9 regression: same-volume quarantine must succeed, got {disposition}"
+    )
+    assert (quarantine_dir / source.name).read_text(encoding="utf-8") == "payload"
+    assert not source.exists()
+
+
+def test_fm9_quarantine_custom_dir_override(tmp_path=None):
+    """FM9: an explicit --quarantine-dir still wins over the same-volume default."""
+    root = _tmp_path(tmp_path)
+    custom = root / "custom-quarantine"
+    target = root / "suspect.dll"
+    target.write_text("payload", encoding="utf-8")
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "root-suspicious", "Risk": "CAUTION", "Path": str(target),
+          "SizeBytes": 7, "FileCount": 1, "Action": "quarantine"}],
+    )
+    old_is_windows = cleaner.IS_WINDOWS
+    cleaner.IS_WINDOWS = True
+    try:
+        with _mock_running(cleaner, []):
+            result, _ = _run_with_stdout(lambda: cleaner.clean(
+                "D:", volume=_volume(root), candidates_csv=candidates, yes=True,
+                quarantine_dir=custom, is_user_drive=False, is_system_drive=False,
+            ))
+    finally:
+        cleaner.IS_WINDOWS = old_is_windows
+
+    assert (custom / target.name).exists(), "FM9: explicit --quarantine-dir must win"
+    assert not target.exists()
+    assert any(item["Disposition"] == "QUARANTINED" for item in result["dispositions"])
+    assert result["quarantine_dir"] == os.fspath(custom), (
+        "FM9: the resolved quarantine_dir surfaced in the result must be the override"
+    )

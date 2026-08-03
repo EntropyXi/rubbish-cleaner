@@ -23,8 +23,13 @@ report. The five phases remain **scan → approve → clean → verify → repor
 - `psutil` is the cross-platform runtime dependency. `pywin32` is optional and
   installed only on Windows for UAC and Task Scheduler integration.
 - Windows accepts a fixed local drive such as `C:`. Linux and macOS accept `/`.
-- Windows keeps evidence and quarantine under the Desktop `.omo` directory;
-  Linux and macOS use `$HOME/.omo/`.
+- Windows keeps evidence under the Desktop `.omo` directory; Linux and macOS
+  use `$HOME/.omo/`.
+- Quarantine is same-volume by default: Windows quarantines to the target
+  drive's root (`X:\.rubbish-quarantine\run-<timestamp>\`) so files are never
+  moved across volumes (no cross-volume EXDEV); Linux/macOS fall back to a
+  per-run subdir under the legacy quarantine location. `-QuarantineDir`
+  overrides the location.
 - Install the skill from its repository root with:
 
 ```bash
@@ -85,8 +90,10 @@ path map is in [references/per-app-path-map.md](references/per-app-path-map.md).
 Each run contains `preflight.txt`, `candidates.csv`, `scan-report.json`,
 `cleanup-errors.csv`, and an eight-section `summary.md`. Windows stores runs in
 `%USERPROFILE%\Desktop\.omo\evidence\rubbish-cleaner\`; Linux/macOS store them
-under `$HOME/.omo/evidence/rubbish-cleaner/`. Quarantined items are kept in the
-matching `.omo/quarantine/<drive-id>/` directory.
+under `$HOME/.omo/evidence/rubbish-cleaner/`. Quarantined items are MOVED (not
+deleted) into a per-run, same-volume quarantine — `X:\.rubbish-quarantine\run-<timestamp>\`
+on Windows, or the `-QuarantineDir` override if set — and remain recoverable
+there.
 
 ## Scheduling
 

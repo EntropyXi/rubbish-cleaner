@@ -135,6 +135,28 @@ def _drive_id(drive: str) -> str:
     return "ROOT"
 
 
+def _default_quarantine_dir(drive: str) -> Path:
+    """Resolve the same-volume default quarantine directory for a drive.
+
+    FM9: the default must live on the SAME volume as the source so the
+    ``os.rename`` in ``core.quarantine`` never crosses a device boundary — the
+    old Desktop-based default moved files from e.g. ``D:`` to ``C:`` and the
+    resulting cross-volume EXDEV surfaced as a silent ``MOVE_FAILED``.
+
+    Windows places the quarantine on the target drive root under
+    ``X:\\.rubbish-quarantine\\run-<timestamp>\\``, per-run scoped so repeated
+    runs never collide with an existing destination. POSIX targets are always
+    ``/``, which a normal user cannot write at the root, so we fall back to a
+    per-run subdir under the legacy quarantine location.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if IS_WINDOWS:
+        anchor = Path(drive).anchor
+        root = Path(anchor.rstrip("\\/") + os.sep) if anchor else Path(drive.rstrip("\\/") + os.sep)
+        return root / ".rubbish-quarantine" / f"run-{stamp}"
+    return Path.home() / "Desktop" / ".omo" / "quarantine" / "ROOT" / f"run-{stamp}"
+
+
 def _split_values(values: object) -> list[str]:
     if values is None:
         return []
@@ -791,6 +813,13 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     close_apps = bool(kwargs.get("close_apps", False))
     process_iter = kwargs.get("process_iter")
 
+    # FM9: resolve quarantine ONCE per run. An explicit --quarantine-dir wins;
+    # otherwise the default is on the SAME volume as the source
+    # (X:\.rubbish-quarantine\run-<ts>) so cross-volume EXDEV -> MOVE_FAILED
+    # silent failure is impossible for the default path.
+    quarantine_value = kwargs.get("quarantine_dir")
+    quarantine_dir = Path(quarantine_value) if quarantine_value else _default_quarantine_dir(drive)
+
     if "is_user_drive" in kwargs:
         is_user_drive = bool(kwargs["is_user_drive"])
     elif IS_WINDOWS:
@@ -883,13 +912,11 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                 continue
             print(f"{'DRY-RUN' if dry_run else 'CLEAN'}: category {category} ({risk})")
             for _, row in pending:
-                quarantine_value = kwargs.get("quarantine_dir")
-                default_quarantine = Path.home() / "Desktop" / ".omo" / "quarantine" / _drive_id(drive)
                 disposition = _process_row(
                     row,
                     category,
                     cleanup_csv,
-                    Path(quarantine_value or default_quarantine),
+                    quarantine_dir,
                     allow_posix_unlink=allow_posix_unlink,
                     running_stems=running_stems,
                     dry_run=dry_run,
@@ -909,6 +936,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         "candidates_csv": os.fspath(candidates_path),
         "cleanup_csv": os.fspath(cleanup_csv),
         "checkpoint": os.fspath(checkpoint_path),
+        "quarantine_dir": os.fspath(quarantine_dir),
         "completed_categories": completed,
         "skipped_categories": skipped_categories,
         "dispositions": dispositions,
@@ -1014,6 +1042,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
     print(f"CLEAN COMPLETE: cleanup CSV at {result['cleanup_csv']}")
+    if result.get("quarantine_dir"):
+        print(
+            f"QUARANTINE: quarantined items were MOVED (not deleted) to "
+            f"{result['quarantine_dir']} and remain recoverable"
+        )
     return 0
 
 
