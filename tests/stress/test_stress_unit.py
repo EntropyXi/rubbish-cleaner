@@ -409,7 +409,12 @@ def test_broken_symlink_cycle(stress_root: Path) -> None:
         print("SYMLINK_CYCLE_CREATED=True")
 
         start = time.monotonic()
-        extra = {} if IS_WINDOWS else {"home_dir": os.fspath(workdir)}
+        # is_user_drive=True: recycle-bin is a POSIX user category, so with
+        # is_user_drive=False the scanner filters it out and the walk would
+        # never touch the symlink cycle (making the test vacuous on POSIX).
+        extra = {"is_user_drive": True}
+        if not IS_WINDOWS:
+            extra["home_dir"] = os.fspath(workdir)
         result = _scan(workdir, ["recycle-bin"], workdir / "out", **extra)
         elapsed = time.monotonic() - start
         assert elapsed < _CYCLE_SCAN_GATE_SECONDS, (
