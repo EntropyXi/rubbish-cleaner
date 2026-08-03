@@ -90,6 +90,67 @@ _WATCHED_PROCESSES = {
     "pip",
     "npm",
 }
+
+# FM4: category -> owner-process specs. A category whose owner process is
+# running is skipped ENTIRELY (never killed, never partially cleaned) at both
+# scan time and clean time. "jetbrains*" is a prefix match. Categories absent
+# here (root-temps, empty-dirs, ...) have no owner and are never gated.
+CATEGORY_OWNER_PROCESSES = {
+    "browser-caches": ["chrome", "msedge"],
+    "app-caches": ["wechat", "weixin", "wechatapp"],
+    "gpu-shader": [
+        "steam",
+        "wegame",
+        "epicgameslauncher",
+        "battle.net",
+        "valorant",
+        "cs2",
+        "dota2",
+        "overwatch",
+        "apexlegends",
+        "fortnite",
+        "minecraft",
+    ],
+    "dev-caches": ["pip", "npm", "python", "node"],
+    "ide-caches": ["jetbrains*", "zotero", "code"],
+    "crash-dumps": [],
+}
+
+_OWNER_DISPLAY = {
+    "chrome": "Chrome",
+    "msedge": "Edge",
+    "wechat": "微信",
+    "weixin": "微信",
+    "wechatapp": "微信",
+    "steam": "Steam",
+    "wegame": "WeGame",
+    "epicgameslauncher": "Epic Games",
+    "battle.net": "Battle.net",
+    "valorant": "Valorant",
+    "cs2": "CS2",
+    "dota2": "Dota 2",
+    "overwatch": "Overwatch",
+    "apexlegends": "Apex Legends",
+    "fortnite": "Fortnite",
+    "minecraft": "Minecraft",
+    "pip": "pip",
+    "npm": "npm",
+    "python": "Python",
+    "node": "Node.js",
+    "jetbrains*": "JetBrains IDE",
+    "zotero": "Zotero",
+    "code": "VS Code",
+}
+
+_CATEGORY_DISPLAY = {
+    "browser-caches": "浏览器缓存",
+    "app-caches": "应用缓存",
+    "gpu-shader": "GPU 着色器缓存",
+    "dev-caches": "开发工具缓存",
+    "ide-caches": "IDE 缓存",
+    "crash-dumps": "崩溃转储",
+}
+
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
 
 
@@ -700,21 +761,45 @@ def _write_outputs(run_dir: Path, new_rows: list[dict[str, Any]], evaluated: lis
     return combined, report
 
 
-def _process_names() -> list[str]:
-    names: list[str] = []
+def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
+    """Return the lowercased stem of every currently running process name."""
+    stems: set[str] = set()
+    iter_func = process_iter or psutil.process_iter
     try:
-        processes = psutil.process_iter(["name"])
+        processes = iter_func(["name"])
         for process in processes:
             try:
                 name = str(process.info.get("name") or "")
             except (psutil.Error, OSError):
                 continue
-            stem = Path(name).stem.casefold()
-            if stem in _WATCHED_PROCESSES and name not in names:
-                names.append(name)
+            stems.add(Path(name).stem.casefold())
     except (psutil.Error, OSError):
         pass
-    return names
+    return stems
+
+
+def _process_spec_matches(spec: str, stems: set[str]) -> bool:
+    """Whether a running stem satisfies an owner spec (``jetbrains*`` prefix)."""
+    if spec.endswith("*"):
+        prefix = spec[:-1].casefold()
+        return any(stem.startswith(prefix) for stem in stems)
+    return spec.casefold() in stems
+
+
+def _owners_running(category: str, stems: set[str]) -> list[str]:
+    """Return the owner-process specs of *category* that are currently running."""
+    owners = CATEGORY_OWNER_PROCESSES.get(category) or []
+    return [spec for spec in owners if _process_spec_matches(spec, stems)]
+
+
+def _fm4_skip_message(category: str, owners: Sequence[str]) -> str:
+    display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in owners}))
+    category_display = _CATEGORY_DISPLAY.get(category, category)
+    return f"检测到 {display} 运行中，{category_display}清理已跳过。关闭后重跑该类别即可。"
+
+
+def _process_names() -> list[str]:
+    return sorted(stem for stem in _snapshot_process_stems() if stem in _WATCHED_PROCESSES)
 
 
 def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
@@ -803,9 +888,17 @@ def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
     }
 
     evaluated: list[str] = []
+    running_stems = _snapshot_process_stems(process_iter=kwargs.get("process_iter"))
     completed_set = {str(category).casefold() for category in completed}
     for category in applicable:
         if category.casefold() in completed_set:
+            continue
+        # FM4 scan-time gate: an owner process running now skips the whole
+        # category so its candidates are never generated (and never reach
+        # clean_contents later). Never gates elevated-system.
+        owners = [] if category == "elevated-system" else _owners_running(category, running_stems)
+        if owners:
+            print(f"SKIP: {_fm4_skip_message(category, owners)}")
             continue
         evaluated.append(category)
         checkpoint["fileCounter"] = 0

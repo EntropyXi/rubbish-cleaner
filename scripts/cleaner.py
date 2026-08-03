@@ -20,6 +20,8 @@ if __package__ in (None, ""):
 
 from scripts.lib import core, platform
 
+import psutil
+
 
 IS_WINDOWS = platform.IS_WINDOWS
 
@@ -54,6 +56,65 @@ _CATEGORY_RISK_MAP = {
 }
 _CANONICAL_CATEGORY = {category.casefold(): category for category in _CATEGORY_RISK_MAP}
 
+# FM4: category -> owner-process specs (mirror of scanner.CATEGORY_OWNER_PROCESSES).
+# A running owner gates the WHOLE category: it is skipped with a clear message,
+# never killed. "jetbrains*" is a prefix match.
+_CATEGORY_OWNER_PROCESSES = {
+    "browser-caches": ["chrome", "msedge"],
+    "app-caches": ["wechat", "weixin", "wechatapp"],
+    "gpu-shader": [
+        "steam",
+        "wegame",
+        "epicgameslauncher",
+        "battle.net",
+        "valorant",
+        "cs2",
+        "dota2",
+        "overwatch",
+        "apexlegends",
+        "fortnite",
+        "minecraft",
+    ],
+    "dev-caches": ["pip", "npm", "python", "node"],
+    "ide-caches": ["jetbrains*", "zotero", "code"],
+    "crash-dumps": [],
+}
+
+_OWNER_DISPLAY = {
+    "chrome": "Chrome",
+    "msedge": "Edge",
+    "wechat": "微信",
+    "weixin": "微信",
+    "wechatapp": "微信",
+    "steam": "Steam",
+    "wegame": "WeGame",
+    "epicgameslauncher": "Epic Games",
+    "battle.net": "Battle.net",
+    "valorant": "Valorant",
+    "cs2": "CS2",
+    "dota2": "Dota 2",
+    "overwatch": "Overwatch",
+    "apexlegends": "Apex Legends",
+    "fortnite": "Fortnite",
+    "minecraft": "Minecraft",
+    "pip": "pip",
+    "npm": "npm",
+    "python": "Python",
+    "node": "Node.js",
+    "jetbrains*": "JetBrains IDE",
+    "zotero": "Zotero",
+    "code": "VS Code",
+}
+
+_CATEGORY_DISPLAY = {
+    "browser-caches": "浏览器缓存",
+    "app-caches": "应用缓存",
+    "gpu-shader": "GPU 着色器缓存",
+    "dev-caches": "开发工具缓存",
+    "ide-caches": "IDE 缓存",
+    "crash-dumps": "崩溃转储",
+}
+
 
 def _drive_id(drive: str) -> str:
     if IS_WINDOWS:
@@ -69,6 +130,43 @@ def _split_values(values: object) -> list[str]:
     for value in source:
         result.extend(part.strip() for part in str(value).split(",") if part.strip())
     return result
+
+
+def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
+    """Return the lowercased stem of every currently running process name."""
+    stems: set[str] = set()
+    iter_func = process_iter or psutil.process_iter
+    try:
+        processes = iter_func(["name"])
+        for process in processes:
+            try:
+                name = str(process.info.get("name") or "")
+            except (psutil.Error, OSError):
+                continue
+            stems.add(Path(name).stem.casefold())
+    except (psutil.Error, OSError):
+        pass
+    return stems
+
+
+def _process_spec_matches(spec: str, stems: set[str]) -> bool:
+    """Whether a running stem satisfies an owner spec (``jetbrains*`` prefix)."""
+    if spec.endswith("*"):
+        prefix = spec[:-1].casefold()
+        return any(stem.startswith(prefix) for stem in stems)
+    return spec.casefold() in stems
+
+
+def _owners_running(category: str, stems: set[str]) -> list[str]:
+    """Return the owner-process specs of *category* that are currently running."""
+    owners = _CATEGORY_OWNER_PROCESSES.get(category) or []
+    return [spec for spec in owners if _process_spec_matches(spec, stems)]
+
+
+def _fm4_skip_message(category: str, owners: Sequence[str]) -> str:
+    display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in owners}))
+    category_display = _CATEGORY_DISPLAY.get(category, category)
+    return f"检测到 {display} 运行中，{category_display}清理已跳过。关闭后重跑该类别即可。"
 
 
 def _write_text_no_follow(path: Path, text: str) -> None:
@@ -515,6 +613,8 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     input_func = kwargs.get("input_func", input)
     shell_execute = kwargs.get("shell_execute", _shell_execute_elevated)
     allow_posix_unlink = bool(kwargs.get("allow_posix_unlink", False))
+    close_apps = bool(kwargs.get("close_apps", False))
+    process_iter = kwargs.get("process_iter")
 
     if "is_user_drive" in kwargs:
         is_user_drive = bool(kwargs["is_user_drive"])
@@ -539,6 +639,20 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     skipped_categories: list[str] = []
     dispositions: list[dict[str, str]] = []
 
+    # FM4: clean-time process snapshot. --close-apps prompts the user to close
+    # the running owner apps (never auto-kill) and then re-snapshots.
+    running_stems = _snapshot_process_stems(process_iter=process_iter)
+    if close_apps:
+        pending_owners: set[str] = set()
+        for category in groups:
+            if category == "elevated-system":
+                continue
+            pending_owners.update(_owners_running(category, running_stems))
+        if pending_owners:
+            display = "、".join(sorted({_OWNER_DISPLAY.get(spec, spec.title()) for spec in pending_owners}))
+            input_func(f"检测到以下应用正在运行：{display}。请关闭它们后按 Enter 继续（本工具不会自动关闭应用）")
+            running_stems = _snapshot_process_stems(process_iter=process_iter)
+
     for category, entries in groups.items():
         if categories and category.casefold() not in categories:
             skipped_categories.append(category)
@@ -547,6 +661,13 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         if category.casefold() in {item.casefold() for item in completed}:
             skipped_categories.append(category)
             print(f"SKIP: category {category} already completed (resume)")
+            continue
+        # FM4 category-level gate: owner running -> the whole category is
+        # skipped with a clear message. elevated-system is never gated.
+        owners = [] if category == "elevated-system" else _owners_running(category, running_stems)
+        if owners:
+            print(f"SKIP: {_fm4_skip_message(category, owners)}")
+            skipped_categories.append(category)
             continue
         pending = entries
 
@@ -626,6 +747,8 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace) -> list[str]:
         command.append("-Resume")
     if arguments.allow_posix_unlink:
         command.append("--allow-posix-unlink")
+    if getattr(arguments, "close_apps", False):
+        command.append("--close-apps")
     if arguments.Categories:
         command.extend(["-Categories", ",".join(_split_values(arguments.Categories))])
     return command
@@ -664,6 +787,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="explicitly allow POSIX unlink of files (default: POSIX files are skipped as unsafe)",
     )
+    parser.add_argument(
+        "--close-apps",
+        action="store_true",
+        dest="close_apps",
+        help="prompt the user to close running owner apps (never auto-kill) instead of skipping their categories",
+    )
     return parser
 
 
@@ -688,6 +817,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             skip_elevated=arguments.SkipElevated,
             resume=arguments.Resume,
             allow_posix_unlink=arguments.allow_posix_unlink,
+            close_apps=getattr(arguments, "close_apps", False),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
