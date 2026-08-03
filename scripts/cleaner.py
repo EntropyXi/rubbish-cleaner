@@ -145,6 +145,13 @@ def _split_values(values: object) -> list[str]:
     return result
 
 
+def _size_of(path: str) -> int:
+    try:
+        return int(os.stat(path, follow_symlinks=False).st_size)
+    except OSError:
+        return 0
+
+
 def _snapshot_process_stems(process_iter: Any = None) -> set[str]:
     """Return the lowercased stem of every currently running process name."""
     stems: set[str] = set()
@@ -365,6 +372,7 @@ def _clean_contents(
     *,
     running_stems: set[str],
     allow_posix_unlink: bool,
+    dry_run: bool,
 ) -> str:
     """FM5: recursively delete FILES inside *target_dir*, KEEPING the directory.
 
@@ -376,15 +384,12 @@ def _clean_contents(
     """
     target = Path(target_dir)
     if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
-        return _record(
-            csv_path,
-            category,
-            "Remove",
-            target_dir,
-            "SKIP_NOT_FOUND",
-            "re-verify failed: directory is missing or a traversal link",
-        )
-    if _owners_running(category, running_stems):
+        message = "re-verify failed: directory is missing or a traversal link"
+        if dry_run:
+            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | clean_contents ({message})")
+            return "DRY_RUN"
+        return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
+    if not dry_run and _owners_running(category, running_stems):
         return _record(
             csv_path,
             category,
@@ -393,6 +398,14 @@ def _clean_contents(
             "SKIP_LOCKED",
             "owner process started between scan and clean (defense-in-depth)",
         )
+
+    if dry_run:
+        for file_path in _iter_regular_files(target):
+            print(
+                f"DRY-RUN: {category} | {_size_of(str(file_path))} bytes | "
+                f"{file_path} | clean_contents (keeps directory)"
+            )
+        return "DRY_RUN"
 
     deleted = 0
     for file_path in _iter_regular_files(target):
@@ -431,18 +444,18 @@ def _clean_contents(
     return "OK"
 
 
-def _remove_if_empty(category: str, target_dir: str, csv_path: Path) -> str:
+def _remove_if_empty(category: str, target_dir: str, csv_path: Path, *, dry_run: bool) -> str:
     """FM5: delete *target_dir* only when it is verified empty (junction-aware)."""
     if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
-        return _record(
-            csv_path,
-            category,
-            "Remove",
-            target_dir,
-            "SKIP_NOT_FOUND",
-            "re-verify failed: directory is missing or a traversal link",
-        )
+        message = "re-verify failed: directory is missing or a traversal link"
+        if dry_run:
+            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty ({message})")
+            return "DRY_RUN"
+        return _record(csv_path, category, "Remove", target_dir, "SKIP_NOT_FOUND", message)
     if not core.is_dir_empty(target_dir):
+        if dry_run:
+            print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty (SKIP_NOT_EMPTY)")
+            return "DRY_RUN"
         return _record(
             csv_path,
             category,
@@ -451,6 +464,9 @@ def _remove_if_empty(category: str, target_dir: str, csv_path: Path) -> str:
             "SKIP_NOT_EMPTY",
             "re-verify failed: directory is not empty",
         )
+    if dry_run:
+        print(f"DRY-RUN: {category} | 0 bytes | {target_dir} | remove_if_empty (verified empty)")
+        return "DRY_RUN"
     return core.safe_remove(target_dir, category, os.fspath(csv_path))
 
 
@@ -462,6 +478,7 @@ def _process_row(
     *,
     allow_posix_unlink: bool = False,
     running_stems: Optional[set[str]] = None,
+    dry_run: bool = False,
 ) -> str:
     target = row["Path"]
     action = row["Action"]
@@ -477,11 +494,15 @@ def _process_row(
             csv_path,
             running_stems=running,
             allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
         )
     if execution == "remove_if_empty":
-        return _remove_if_empty(category, target, csv_path)
+        return _remove_if_empty(category, target, csv_path, dry_run=dry_run)
 
     if _has_traversal_link(target):
+        if dry_run:
+            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action} (SKIP_JUNCTION)")
+            return "DRY_RUN"
         return _record(
             csv_path,
             category,
@@ -493,6 +514,9 @@ def _process_row(
     if action not in {"quarantine", "delete", "ask"}:
         print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
         return "SKIP_REPORT_ONLY"
+    if dry_run:
+        print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action}")
+        return "DRY_RUN"
 
     # FM1/FM2: quarantine and delete run the SAME lock probe. The quarantine
     # early-return must NOT bypass it, and on POSIX an unlink decision never
@@ -752,7 +776,8 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     run_dir = candidates_path.parent
     cleanup_csv = run_dir / "cleanup-errors.csv"
     checkpoint_path = run_dir / "clean-checkpoint.json"
-    _ensure_cleanup_csv(cleanup_csv)
+    if not bool(kwargs.get("dry_run", False)):
+        _ensure_cleanup_csv(cleanup_csv)
 
     yes = bool(kwargs.get("yes", False))
     skip_elevated = bool(kwargs.get("skip_elevated", False))
@@ -762,6 +787,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     input_func = kwargs.get("input_func", input)
     shell_execute = kwargs.get("shell_execute", _shell_execute_elevated)
     allow_posix_unlink = bool(kwargs.get("allow_posix_unlink", False))
+    dry_run = bool(kwargs.get("dry_run", False))
     close_apps = bool(kwargs.get("close_apps", False))
     process_iter = kwargs.get("process_iter")
 
@@ -791,7 +817,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     # FM4: clean-time process snapshot. --close-apps prompts the user to close
     # the running owner apps (never auto-kill) and then re-snapshots.
     running_stems = _snapshot_process_stems(process_iter=process_iter)
-    if close_apps:
+    if close_apps and not dry_run:
         pending_owners: set[str] = set()
         for category in groups:
             if category == "elevated-system":
@@ -823,20 +849,24 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         risk = entries[0][1]["Risk"]
         handled = False
         if risk == "ELEVATED":
-            handled = _handle_elevated(
-                category,
-                drive=drive,
-                run_dir=run_dir,
-                csv_path=cleanup_csv,
-                yes=yes,
-                skip_elevated=skip_elevated,
-                is_user_drive=is_user_drive,
-                is_system_drive=is_system_drive,
-                shell_execute=shell_execute,
-                rows=[row for _, row in pending],
-            )
+            if dry_run:
+                print(f"DRY-RUN: category {category} (report-only; elevated batch not generated)")
+                handled = True
+            else:
+                handled = _handle_elevated(
+                    category,
+                    drive=drive,
+                    run_dir=run_dir,
+                    csv_path=cleanup_csv,
+                    yes=yes,
+                    skip_elevated=skip_elevated,
+                    is_user_drive=is_user_drive,
+                    is_system_drive=is_system_drive,
+                    shell_execute=shell_execute,
+                    rows=[row for _, row in pending],
+                )
         else:
-            approved = _category_approved(
+            approved = dry_run or _category_approved(
                 category,
                 risk,
                 pending,
@@ -851,7 +881,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                 else:
                     print(f"SKIP: category {category} declined by user")
                 continue
-            print(f"CLEAN: category {category} ({risk})")
+            print(f"{'DRY-RUN' if dry_run else 'CLEAN'}: category {category} ({risk})")
             for _, row in pending:
                 quarantine_value = kwargs.get("quarantine_dir")
                 default_quarantine = Path.home() / "Desktop" / ".omo" / "quarantine" / _drive_id(drive)
@@ -862,6 +892,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                     Path(quarantine_value or default_quarantine),
                     allow_posix_unlink=allow_posix_unlink,
                     running_stems=running_stems,
+                    dry_run=dry_run,
                 )
                 dispositions.append({"Category": category, "Path": row["Path"], "Disposition": disposition})
             handled = True
@@ -869,7 +900,8 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
         if handled:
             if category not in completed:
                 completed.append(category)
-            _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
+            if not dry_run:
+                _write_checkpoint(checkpoint_path, completed, _checkpoint_frontier(rows, completed))
 
     return {
         "drive": drive,
@@ -897,6 +929,8 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace) -> list[str]:
         command.append("-Resume")
     if arguments.allow_posix_unlink:
         command.append("--allow-posix-unlink")
+    if getattr(arguments, "dry_run", False):
+        command.append("--dry-run")
     if getattr(arguments, "close_apps", False):
         command.append("--close-apps")
     if arguments.Categories:
@@ -938,6 +972,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="explicitly allow POSIX unlink of files (default: POSIX files are skipped as unsafe)",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="print a per-file preview of every deletion without touching any file",
+    )
+    parser.add_argument(
         "--close-apps",
         action="store_true",
         dest="close_apps",
@@ -967,6 +1007,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             skip_elevated=arguments.SkipElevated,
             resume=arguments.Resume,
             allow_posix_unlink=arguments.allow_posix_unlink,
+            dry_run=getattr(arguments, "dry_run", False),
             close_apps=getattr(arguments, "close_apps", False),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:

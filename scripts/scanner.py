@@ -164,6 +164,11 @@ CATEGORY_ACTION_MAP = {
     "empty-dirs": "remove_if_empty",
 }
 
+# FM0: conservative default posture. Only age-gated temp/logs and verified
+# empty dirs run by default; app-owned caches and crash-dumps are opt-in via
+# an explicit --categories list.
+_CONSERVATIVE_DEFAULT_CATEGORIES = {"root-temps", "root-logs", "empty-dirs", "user-temp"}
+
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
 
 
@@ -659,7 +664,7 @@ def _parse_categories(value: object) -> Optional[list[str]]:
 
 def _applicable_categories(categories: Optional[list[str]], is_user_drive: bool, include_elevated: bool) -> list[str]:
     order = _WINDOWS_ORDER if IS_WINDOWS else _POSIX_ORDER
-    selected = set(categories) if categories is not None else set(order)
+    selected = set(categories) if categories is not None else set(_CONSERVATIVE_DEFAULT_CATEGORIES)
     user_categories = _WINDOWS_USER_CATEGORIES if IS_WINDOWS else _POSIX_USER_CATEGORIES
     result: list[str] = []
     for category in order:
@@ -901,6 +906,7 @@ def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
     }
 
     evaluated: list[str] = []
+    dry_run = bool(kwargs.get("dry_run", False))
     running_stems = _snapshot_process_stems(process_iter=kwargs.get("process_iter"))
     completed_set = {str(category).casefold() for category in completed}
     for category in applicable:
@@ -919,6 +925,9 @@ def scan(drive: str, **kwargs: Any) -> dict[str, Any]:
         _complete_category(checkpoint, category)
 
     combined_rows, report = _write_outputs(run_dir, context["rows"], applicable)
+    if dry_run:
+        for row in combined_rows:
+            print(f"DRY-RUN: {row['Category']} | {row['SizeBytes']} bytes | {row['Path']} | {row['Action']}")
     return {
         "drive": drive,
         "run_dir": os.fspath(run_dir),
@@ -944,6 +953,8 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace, out_dir: Path) -
         command.extend(["-Categories", arguments.Categories])
     if arguments.Resume:
         command.append("-Resume")
+    if getattr(arguments, "dry_run", False):
+        command.append("--dry-run")
     return command
 
 
@@ -1004,6 +1015,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-Resume", action="store_true")
     parser.add_argument("-Parallel", action="store_true")
     parser.add_argument("-Throttle", type=int, default=4)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="print a per-file preview of every candidate without deleting anything",
+    )
     return parser
 
 
@@ -1022,6 +1039,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             include_elevated=arguments.IncludeElevated,
             categories=arguments.Categories,
             resume=arguments.Resume,
+            dry_run=getattr(arguments, "dry_run", False),
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

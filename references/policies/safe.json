@@ -1,22 +1,18 @@
 {
   "name": "safe",
-  "description": "Conservative daily cleanup: temp files, logs, caches and empty directories only. No recycle-bin or elevated system operations. Ideal as a default scheduled profile.",
+  "description": "Conservative default: age-gated temp files and logs plus verified empty directories only. App-owned caches and crash dumps are opt-in via an explicit --categories list or the aggressive policy. Ideal as a default scheduled profile.",
   "categories": [
     "root-temps",
     "root-logs",
-    "app-caches",
     "empty-dirs",
-    "browser-caches",
-    "gpu-shader",
-    "dev-caches",
-    "ide-caches",
-    "thumbnail-cache"
+    "user-temp"
   ],
-  "maxAgeDays": 30,
+  "maxAgeDays": 7,
   "includeElevated": false,
   "excludeCategories": [
     "recycle-bin",
-    "root-suspicious"
+    "root-suspicious",
+    "elevated-system"
   ],
   "notifyOnCompletion": true
 }

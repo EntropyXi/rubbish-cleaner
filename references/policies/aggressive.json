@@ -1,24 +1,25 @@
 {
   "name": "aggressive",
-  "description": "Deep cleanup: everything in the safe profile plus recycle-bin, suspicious root binaries, crash dumps, user temp and elevated system operations. Requires administrator privileges on Windows; use with care.",
+  "description": "Deep cleanup: everything in the safe profile plus app-owned caches (browser/app/gpu/dev/ide), crash-dump contents and thumbnail caches. Still never touches the recycle bin, suspicious root binaries or elevated system operations without explicit flags.",
   "categories": [
     "root-temps",
     "root-logs",
-    "app-caches",
     "empty-dirs",
+    "user-temp",
+    "app-caches",
     "browser-caches",
     "gpu-shader",
     "dev-caches",
     "ide-caches",
-    "thumbnail-cache",
+    "crash-dumps",
+    "thumbnail-cache"
+  ],
+  "maxAgeDays": 30,
+  "includeElevated": false,
+  "excludeCategories": [
     "recycle-bin",
     "root-suspicious",
-    "crash-dumps",
-    "user-temp",
     "elevated-system"
   ],
-  "maxAgeDays": 90,
-  "includeElevated": true,
-  "excludeCategories": [],
   "notifyOnCompletion": true
 }
