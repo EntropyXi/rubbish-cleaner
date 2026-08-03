@@ -59,7 +59,10 @@ _DEFAULT_FILE_COUNT = 50000
 _FILE_SIZE = 2048  # 2 KiB per file via os.write
 _GEN_BUDGET_SECONDS = 240.0  # abort generation if the machine is too slow
 _SCAN_GATE_SECONDS = 600.0  # scan must finish within 10 minutes
-_DEEP_SCAN_GATE_SECONDS = 120.0  # deep-nesting scan must not hang
+_DEEP_SCAN_GATE_SECONDS = 360.0  # deep-nesting scan must not hang (Windows CI
+                                 # long-paths runners legitimately take ~134s to
+                                 # scan a 1000-level chain — that is slow I/O,
+                                 # not a hang)
 _CYCLE_SCAN_GATE_SECONDS = 30.0  # symlink-cycle scan must terminate promptly
 
 _OLD_MTIME_DELTA = 8 * 24 * 3600  # 8 days: safely older than the 7-day gate
