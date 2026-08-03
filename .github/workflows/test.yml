@@ -192,3 +192,46 @@ jobs:
           assert start.returncode == 0, f"FM12: app no longer starts: {start.stderr}"
           print("REAL-APP CLEAN INTEGRATION: PASS")
           PY
+
+  # Informational stress job — deliberately SEPARATE from the 9-job `test`
+  # matrix above (which must stay untouched). Runs the slow L1/L2/L4 stress
+  # suites on 2 OS with a job-level timeout. It is NOT a required check and
+  # never gates routine CI: it only surfaces perf/leak/safety-fuzz trends.
+  #
+  # runs-on is a 2-entry matrix (ubuntu-latest, windows-latest) because a
+  # single `runs-on: [ubuntu-latest, windows-latest]` array uses AND semantics
+  # (a runner must match ALL labels) and could never be satisfied.
+  #
+  # RUBBISH_STRESS_ROOT: the fixture's local default is D:\_rubbish_cleaner_stress
+  # (Windows CI runners have NO D:), so the env override redirects the stress
+  # root to the runner's temp dir. FUZZ_ITERS caps the L4 fuzz worlds at 20
+  # for CI runtime (local default is 500).
+  stress:
+    name: stress (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      RUBBISH_STRESS_ROOT: ${{ runner.temp }}\rubbish-stress
+      FUZZ_ITERS: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Run stress suite
+        shell: bash
+        run: python -m pytest tests/stress/ -m stress -x --tb=short
