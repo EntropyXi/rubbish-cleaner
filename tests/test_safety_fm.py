@@ -1,5 +1,6 @@
-"""FM1-FM3 safety regression tests (POSIX default-skip, quarantine lock-probe,
-candidates-driven elevated batch with forfiles age gate).
+"""FM1-FM3 + FM4/FM5/FM0 safety regression tests (POSIX default-skip,
+quarantine lock-probe, candidates-driven elevated batch, process-awareness
+gate, dual-action execution, conservative default posture + dry-run).
 
 Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
 - FM1: POSIX rows return ``SKIP_POSIX_UNSAFE`` without ever calling the flock
@@ -11,15 +12,28 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
   ``del``, and ``wuauserv`` is restarted after the cleanup steps.
 - FM8: ``get_fixed_drives`` returns only fixed local drives; removable, CD and
   network volumes are filtered out via the ``fixed`` partition opt.
+- FM4: an owner process running (e.g. Chrome) gates its whole category at clean
+  time - 0 files deleted + a clear skip message - and ``--close-apps`` prompts
+  the user without ever killing a process.
+- FM5: ``clean_contents`` deletes only the FILES inside a cache directory (the
+  directory survives); ``remove_if_empty`` deletes only verified-empty dirs.
+- FM0: the default scan/clean posture is conservative (no app-owned caches),
+  explicit ``--categories`` re-includes them, ``--dry-run`` previews without
+  deleting, and the policy JSONs parse with a conservative safe profile.
 """
 
 from __future__ import annotations
 
 import atexit
+import contextlib
+import csv
 import ctypes
+import io
+import json
 import os
 import shutil
 import tempfile
+import time
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,7 +42,7 @@ from unittest import mock
 
 import psutil
 
-from scripts import cleaner
+from scripts import cleaner, scanner
 from scripts.lib.platform import IS_WINDOWS
 
 
@@ -309,3 +323,297 @@ def test_fm8_removable_drive_excluded(tmp_path=None):
     assert "E:\\" not in drives, "FM8 regression: removable drive leaked into fixed list"
     assert "D:\\" not in drives, "FM8 regression: cdrom drive leaked into fixed list"
     assert drives == ["C:\\"], "FM8 regression: only fixed drive should be returned"
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers for FM4/FM5/FM0
+# --------------------------------------------------------------------------- #
+
+def _write_candidates(path: Path, rows: list[dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=("Category", "Risk", "Path", "SizeBytes", "FileCount", "Action"),
+            delimiter="|",
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _volume(root: Path) -> dict[str, object]:
+    return {"Root": str(root), "FreeBytes": 1000, "TotalBytes": 5000}
+
+
+def _run_with_stdout(func):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        value = func()
+    return value, buffer.getvalue()
+
+
+class _FakeProc:
+    def __init__(self, name):
+        self._info = {"name": name}
+
+    @property
+    def info(self):
+        return self._info
+
+
+def _mock_running(module, names):
+    return mock.patch.object(module.psutil, "process_iter", return_value=[_FakeProc(name) for name in names])
+
+
+def _clean_browser_cache(root: Path, file_names: list[str]) -> tuple[Path, list[Path], Path]:
+    cache = root / "cache"
+    cache.mkdir()
+    files = [_aged_file(cache / name, 10) for name in file_names]
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "browser-caches", "Risk": "SAFE", "Path": str(cache),
+          "SizeBytes": 7 * len(files), "FileCount": len(files), "Action": "delete"}],
+    )
+    return cache, files, candidates
+
+
+# --------------------------------------------------------------------------- #
+# FM4 — process-awareness gate (owner running -> category skip, never kill)
+# --------------------------------------------------------------------------- #
+
+def test_fm4_process_gate_skips_running_app(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    cache, files, candidates = _clean_browser_cache(root, ["f1.bin"])
+
+    with _mock_running(cleaner, ["chrome.exe"]):
+        result, out = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert files[0].exists(), "FM4 regression: running-app cache file must survive"
+    assert cache.exists()
+    assert result["dispositions"] == [], "FM4 regression: gated category must not delete anything"
+    assert "browser-caches" in result["skipped_categories"]
+    assert "检测到 Chrome 运行中" in out, "FM4 regression: skip message must name the running app"
+    assert "浏览器缓存清理已跳过" in out, "FM4 regression: skip message must name the category"
+
+
+def test_fm4_process_stopped_cleans_normally(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    cache, files, candidates = _clean_browser_cache(root, ["f1.bin"])
+
+    with _mock_running(cleaner, []):
+        result, _ = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert not files[0].exists(), "FM4 regression: stopped-app cache contents should be cleaned"
+    assert cache.exists(), "FM4/FM5: clean_contents keeps the directory"
+    assert any(item["Disposition"] == "OK" for item in result["dispositions"])
+
+
+def test_fm4_close_apps_prompts_and_never_kills(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    cache, files, candidates = _clean_browser_cache(root, ["f1.bin"])
+    prompts: list[str] = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return ""  # user presses Enter without actually closing anything
+
+    with _mock_running(cleaner, ["chrome.exe"]):
+        result, _ = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=root / "quarantine", input_func=fake_input,
+            close_apps=True, is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert prompts, "FM4 regression: --close-apps must prompt the user"
+    assert "关闭" in prompts[0] and "Chrome" in prompts[0]
+    assert files[0].exists(), "FM4 regression: files must survive (never auto-kill)"
+    assert result["dispositions"] == []
+    assert "browser-caches" in result["skipped_categories"]
+
+
+# --------------------------------------------------------------------------- #
+# FM5 — dual-action execution (clean_contents vs remove_if_empty)
+# --------------------------------------------------------------------------- #
+
+def test_fm5_clean_contents_keeps_directory(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    cache, files, candidates = _clean_browser_cache(root, ["f1.bin", "f2.bin", "f3.bin", "f4.bin", "f5.bin"])
+
+    with _mock_running(cleaner, []):
+        result, _ = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert cache.exists(), "FM5 regression: clean_contents must keep the directory"
+    assert all(not f.exists() for f in files), "FM5 regression: all 5 cache files must be deleted"
+    cleanup_text = (root / "cleanup-errors.csv").read_text(encoding="utf-8")
+    assert cleanup_text.count("|OK\n") == 5, "FM5 regression: every deleted file must record OK"
+    assert any(item["Disposition"] == "OK" for item in result["dispositions"])
+
+
+def test_fm5_remove_if_empty_only_empty(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    empty = root / "empty"
+    empty.mkdir()
+    non_empty = root / "non-empty"
+    non_empty.mkdir()
+    (non_empty / "keep.txt").write_text("keep", encoding="utf-8")
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [
+            {"Category": "empty-dirs", "Risk": "SAFE", "Path": str(empty), "SizeBytes": 0, "FileCount": 0, "Action": "delete"},
+            {"Category": "empty-dirs", "Risk": "SAFE", "Path": str(non_empty), "SizeBytes": 0, "FileCount": 0, "Action": "delete"},
+        ],
+    )
+
+    result, _ = _run_with_stdout(lambda: cleaner.clean(
+        "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+        quarantine_dir=root / "quarantine", is_user_drive=False, is_system_drive=False,
+    ))
+
+    assert not empty.exists(), "FM5 regression: verified-empty dir must be removed"
+    assert non_empty.exists(), "FM5 regression: non-empty dir must survive"
+    dispositions = {item["Path"]: item["Disposition"] for item in result["dispositions"]}
+    assert dispositions[str(empty)] == "OK"
+    assert dispositions[str(non_empty)] == "SKIP_NOT_EMPTY"
+
+
+def test_fm5_scanner_action_enum_maps_cache_categories(tmp_path=None):
+    del tmp_path
+    for category in ("app-caches", "browser-caches", "gpu-shader", "dev-caches", "ide-caches", "crash-dumps"):
+        assert scanner.CATEGORY_ACTION_MAP[category] == "clean_contents"
+        assert cleaner._CATEGORY_EXECUTION_MAP[category] == "clean_contents"
+    assert scanner.CATEGORY_ACTION_MAP["empty-dirs"] == "remove_if_empty"
+    assert cleaner._CATEGORY_EXECUTION_MAP["empty-dirs"] == "remove_if_empty"
+
+
+# --------------------------------------------------------------------------- #
+# FM0 — conservative default posture + --dry-run previews
+# --------------------------------------------------------------------------- #
+
+def test_fm0_applicable_categories_default_is_conservative(tmp_path=None):
+    del tmp_path
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        applicable = scanner._applicable_categories(None, is_user_drive=True, include_elevated=False)
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+    assert set(applicable) == {"root-temps", "root-logs", "empty-dirs", "user-temp"}
+    assert "browser-caches" not in applicable, "FM0 regression: app caches must be opt-in"
+    assert "crash-dumps" not in applicable, "FM0 regression: crash dumps must be opt-in"
+
+
+def test_fm0_default_scan_excludes_app_caches(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    (fake / "Temp").mkdir()
+    old = time.time() - 30 * 24 * 60 * 60
+    aged = fake / "Temp" / "a.tmp"
+    aged.write_text("old", encoding="utf-8")
+    os.utime(aged, (old, old))
+    out_dir = root / "out"
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        with _mock_running(scanner, []):
+            result = scanner.scan("X:", root_path=fake, out_dir=out_dir, is_user_drive=False)
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    categories = {row["Category"] for row in result["rows"]}
+    assert "root-temps" in categories, "FM0: conservative default keeps age-gated temp files"
+    for excluded in ("browser-caches", "app-caches", "gpu-shader", "dev-caches", "ide-caches", "crash-dumps"):
+        assert excluded not in categories, f"FM0 regression: default scan must exclude {excluded}"
+
+
+def test_fm0_explicit_categories_include_browser_caches(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    local = fake / "Local"
+    cache = local / "Google" / "Chrome" / "User Data" / "Default" / "Cache"
+    cache.mkdir(parents=True)
+    (cache / "c.bin").write_text("x", encoding="utf-8")
+    out_dir = root / "out"
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        with _mock_running(scanner, []):
+            result = scanner.scan(
+                "X:", root_path=fake, out_dir=out_dir, local_app_data=local,
+                categories=["browser-caches"], is_user_drive=True,
+            )
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    assert any(row["Category"] == "browser-caches" for row in result["rows"]), (
+        "FM0 regression: explicit --categories must re-include browser-caches"
+    )
+
+
+def test_fm0_dry_run_previews_without_deleting(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    target = _aged_file(root / "root.log", 10)
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "root-logs", "Risk": "SAFE", "Path": str(target), "SizeBytes": 7, "FileCount": 1, "Action": "delete"}],
+    )
+
+    result, out = _run_with_stdout(lambda: cleaner.clean(
+        "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+        quarantine_dir=root / "quarantine", dry_run=True,
+        is_user_drive=False, is_system_drive=False,
+    ))
+
+    assert target.exists(), "FM0 regression: dry-run must not delete"
+    assert "DRY-RUN:" in out
+    assert all(item["Disposition"] == "DRY_RUN" for item in result["dispositions"])
+    assert not (root / "cleanup-errors.csv").exists(), "FM0: dry-run must not mutate run outputs"
+
+
+def test_fm0_scanner_dry_run_prints_preview(tmp_path=None):
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    (fake / "Temp").mkdir()
+    old = time.time() - 30 * 24 * 60 * 60
+    aged = fake / "Temp" / "a.tmp"
+    aged.write_text("old", encoding="utf-8")
+    os.utime(aged, (old, old))
+    out_dir = root / "out"
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        with _mock_running(scanner, []):
+            result, out = _run_with_stdout(lambda: scanner.scan(
+                "X:", root_path=fake, out_dir=out_dir,
+                categories=["root-temps"], is_user_drive=False, dry_run=True,
+            ))
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    assert "DRY-RUN:" in out, "FM0 regression: scanner dry-run must print a preview"
+    assert result["rows"], "scanner dry-run still returns the candidate rows"
+
+
+def test_fm0_policy_jsons_conservative_safe_and_aggressive(tmp_path=None):
+    del tmp_path
+    repo = Path(__file__).resolve().parents[1]
+    safe = json.loads((repo / "references" / "policies" / "safe.json").read_text(encoding="utf-8"))
+    aggressive = json.loads((repo / "references" / "policies" / "aggressive.json").read_text(encoding="utf-8"))
+    assert set(safe["categories"]) == {"root-temps", "root-logs", "empty-dirs", "user-temp"}
+    assert "browser-caches" in aggressive["categories"]
+    assert "crash-dumps" in aggressive["categories"]
+    assert "recycle-bin" not in aggressive["categories"], "FM0: aggressive still excludes recycle-bin"
