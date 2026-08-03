@@ -215,7 +215,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
-      RUBBISH_STRESS_ROOT: ${{ runner.temp }}\rubbish-stress
       FUZZ_ITERS: 20
     steps:
       - name: Check out source
@@ -234,4 +233,9 @@ jobs:
 
       - name: Run stress suite
         shell: bash
+        env:
+          # runner.temp is only resolvable at step level (not job-level env),
+          # and GitHub Actions Windows runners have no D:, so the stress root
+          # must be redirected to the runner's temp dir here.
+          RUBBISH_STRESS_ROOT: ${{ runner.temp }}\rubbish-stress
         run: python -m pytest tests/stress/ -m stress -x --tb=short
