@@ -31,6 +31,13 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
   carries a data-file suffix (.db/.sqlite/.sqlite3/.sqlitedb/.db-shm/.db-wal/
   .index/.dat) is upgraded to CAUTION (quarantine), never SAFE/delete;
   .json/.xml/.ini/.conf/.bak do NOT count as data-like.
+- FM7 x FM5 interaction: a CAUTION (data-signature) cache-dir row is dispatched
+  by its ROW Action — quarantined whole, never clean_contents'd in place — and
+  a category may mix SAFE + CAUTION rows in one run.
+- FM13: the dry-run preview prints a per-file line containing
+  path | size | category | action, the interactive confirmation shows
+  "将删除 N 个文件 / X MB" plus the first rows, and the post-clean report lists
+  deleted + skipped + reasons.
 """
 
 from __future__ import annotations
@@ -43,6 +50,8 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 from ctypes import wintypes
@@ -836,3 +845,250 @@ def test_fm7_signature_helper_identifies_data_suffixes(tmp_path=None):
     for name in ("meta.json", "conf.xml", "app.ini", "settings.conf", "backup.bak", "f_0001"):
         (directory / name).write_text("x", encoding="utf-8")
     assert scanner._content_signature_data_like(directory) is False
+
+
+def test_fm7_caution_row_is_quarantined_not_clean_contents(tmp_path=None):
+    """FM7 x FM5: a data-like cache dir escalated to CAUTION must be MOVED to
+    quarantine — the row's Action wins over the category's clean_contents
+    default — so its files are never deleted in place. Pre-fix, the
+    category->clean_contents dispatch fired first and deleted the files."""
+    root = _tmp_path(tmp_path)
+    cache = root / "cache"
+    cache.mkdir()
+    payload = _aged_file(cache / "data.sqlite", 10)
+    quarantine_dir = root / "quarantine"
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "browser-caches", "Risk": "CAUTION", "Path": str(cache),
+          "SizeBytes": 10, "FileCount": 1, "Action": "quarantine"}],
+    )
+
+    with _mock_running(cleaner, []):
+        result, _ = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=quarantine_dir, is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert not cache.exists(), "FM7 x FM5: data-like cache dir must not be cleaned in place"
+    assert not payload.exists()
+    moved = quarantine_dir / "cache"
+    assert moved.exists(), "FM7 x FM5: the whole cache dir must be moved to quarantine"
+    assert (moved / "data.sqlite").read_text(encoding="utf-8") == "payload"
+    assert any(item["Disposition"] == "QUARANTINED" for item in result["dispositions"])
+
+
+def test_fm7_mixed_safe_and_caution_rows_in_category(tmp_path=None):
+    """FM7 x FM5: one category may mix plain SAFE rows (clean_contents) and
+    FM7-escalated CAUTION rows (quarantine) in the same run; grouping must not
+    reject the mix and each row honors its own action. Pre-fix the CAUTION row
+    was rejected as malformed and the whole clean aborted."""
+    root = _tmp_path(tmp_path)
+    safe_cache = root / "safe-cache"
+    safe_cache.mkdir()
+    safe_file = _aged_file(safe_cache / "f.bin", 10)
+    caution_cache = root / "caution-cache"
+    caution_cache.mkdir()
+    _aged_file(caution_cache / "data.sqlite", 10)
+    quarantine_dir = root / "quarantine"
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [
+            {"Category": "browser-caches", "Risk": "SAFE", "Path": str(safe_cache),
+             "SizeBytes": 10, "FileCount": 1, "Action": "delete"},
+            {"Category": "browser-caches", "Risk": "CAUTION", "Path": str(caution_cache),
+             "SizeBytes": 10, "FileCount": 1, "Action": "quarantine"},
+        ],
+    )
+
+    with _mock_running(cleaner, []):
+        result, _ = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=quarantine_dir, is_user_drive=False, is_system_drive=False,
+        ))
+
+    by_path = {item["Path"]: item["Disposition"] for item in result["dispositions"]}
+    assert by_path[str(safe_cache)] == "OK", "SAFE cache row must still clean_contents"
+    assert not safe_file.exists()
+    assert safe_cache.exists(), "clean_contents keeps the directory"
+    assert by_path[str(caution_cache)] == "QUARANTINED", "CAUTION row must quarantine"
+    assert not caution_cache.exists()
+    assert (quarantine_dir / "caution-cache").exists()
+
+
+# --------------------------------------------------------------------------- #
+# FM13 — dry-run per-file preview + confirmation upgrade
+# --------------------------------------------------------------------------- #
+
+def test_fm13_dry_run_per_file_preview(tmp_path=None):
+    """FM13: --dry-run prints a per-file preview line for every candidate
+    containing path | size | category | action, and deletes nothing. Pre-fix
+    the preview mixed only category+size+path and skipped the action field."""
+    root = _tmp_path(tmp_path)
+    cache = root / "cache"
+    cache.mkdir()
+    files = [_aged_file(cache / name, 10) for name in ("f1.bin", "f2.bin")]
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "browser-caches", "Risk": "SAFE", "Path": str(cache),
+          "SizeBytes": 2, "FileCount": 2, "Action": "delete"}],
+    )
+
+    with _mock_running(cleaner, []):
+        result, out = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=True,
+            quarantine_dir=root / "quarantine", dry_run=True,
+            is_user_drive=False, is_system_drive=False,
+        ))
+
+    for file_path in files:
+        line = next(line for line in out.splitlines() if str(file_path) in line)
+        assert "DRY-RUN:" in line
+        assert str(file_path) in line, "FM13: preview line must contain the path"
+        assert "bytes" in line, "FM13: preview line must contain the size"
+        assert "browser-caches" in line, "FM13: preview line must contain the category"
+        assert "clean_contents" in line, "FM13: preview line must contain the action"
+    assert all(file_path.exists() for file_path in files), "FM13: dry-run must not delete"
+    assert all(item["Disposition"] == "DRY_RUN" for item in result["dispositions"])
+    assert not (root / "cleanup-errors.csv").exists(), "FM13: dry-run must not mutate run outputs"
+
+
+def test_fm13_confirmation_shows_counts_and_patterns(tmp_path=None):
+    """FM13: the interactive per-category confirmation shows '将删除 N 个文件 /
+    X MB' plus the first rows before asking. Pre-fix it printed only the bare
+    SUMMARY line with no file count."""
+    root = _tmp_path(tmp_path)
+    cache = root / "cache"
+    cache.mkdir()
+    _aged_file(cache / "f1.bin", 10)
+    _aged_file(cache / "f2.bin", 10)
+    candidates = root / "candidates.csv"
+    _write_candidates(
+        candidates,
+        [{"Category": "browser-caches", "Risk": "SAFE", "Path": str(cache),
+          "SizeBytes": 2, "FileCount": 2, "Action": "delete"}],
+    )
+    answers = ["y"]
+
+    def fake_input(prompt):
+        answers.append(prompt)
+        return answers.pop(0)
+
+    with _mock_running(cleaner, []):
+        _, out = _run_with_stdout(lambda: cleaner.clean(
+            "X:", volume=_volume(root), candidates_csv=candidates, yes=False,
+            quarantine_dir=root / "quarantine", input_func=fake_input,
+            is_user_drive=False, is_system_drive=False,
+        ))
+
+    assert "将删除 2 个文件" in out, "FM13: confirmation must show the file count"
+    assert "MB" in out, "FM13: confirmation must show the size"
+    assert "cache" in out, "FM13: confirmation must show the first rows/patterns"
+
+
+# --------------------------------------------------------------------------- #
+# FM12 / Todo 12 — real-app clean integration (scanner -> cleaner subprocess)
+# --------------------------------------------------------------------------- #
+
+def _run_api_subprocess(code: str, cwd: Path, extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run one scanner/cleaner/marker script as a real subprocess (like
+    test_integration.py) with the workspace on PYTHONPATH."""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(cwd) + os.pathsep + environment.get("PYTHONPATH", "")
+    environment.update(extra_env)
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=cwd,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_fm12_real_app_clean_integration(tmp_path=None):
+    """FM12: end-to-end fake-app clean — scanner -> cleaner (clean_contents).
+
+    Builds a small fake "app" (Ubisoft Game Launcher) with a Cache dir (5 files)
+    + a data file, runs the REAL scanner.py and cleaner.py as subprocesses
+    against it, then verifies (a) cache files gone, (b) the Cache dir still
+    exists, (c) the app's data file untouched, (d) a "still starts" marker
+    script reads the data file and exits 0. Uses only a tmp_path fake app —
+    no real apps, no elevated cleanup.
+    """
+    root = _tmp_path(tmp_path)
+    fake_app = root / "fake_app"
+    cache = fake_app / "Ubisoft Game Launcher" / "cache"
+    cache.mkdir(parents=True)
+    cache_files = [_aged_file(cache / f"f_{index:06d}", 10) for index in range(5)]
+    data_file = fake_app / "data.txt"
+    data_content = "app-user-data-0123456789"
+    data_file.write_text(data_content, encoding="utf-8")
+    marker = fake_app / "start_marker.py"
+    marker.write_text(
+        "import pathlib, sys; "
+        f"sys.exit(0 if pathlib.Path({str(data_file)!r}).read_text(encoding='utf-8') == {data_content!r} else 1)\n",
+        encoding="utf-8",
+    )
+    out_dir = root / "out"
+    quarantine_dir = root / "quarantine"
+    volume = {"Root": str(fake_app), "FreeBytes": 1000, "TotalBytes": 5000}
+    workspace = Path(__file__).resolve().parents[1]
+
+    # -- scanner subprocess: app-caches -> the Cache dir becomes one SAFE row.
+    scanner_code = "\n".join([
+        "from pathlib import Path",
+        "import runpy, sys",
+        "from unittest import mock",
+        "import psutil",
+        "from scripts.lib import core, platform",
+        "platform.IS_WINDOWS = True",
+        "core.IS_WINDOWS = (sys.platform == 'win32')",
+        f"platform.resolve_fixed_drive = lambda drive: {volume!r}",
+        f"sys.argv = ['scanner.py','-Drive','X:','-OutDir',{str(out_dir)!r},'-Categories','app-caches']",
+        "with mock.patch.object(psutil, 'process_iter', return_value=[]):",
+        f"    runpy.run_path({str(workspace / 'scripts' / 'scanner.py')!r}, run_name='__main__')",
+    ])
+    scan_result = _run_api_subprocess(scanner_code, workspace, {})
+    assert scan_result.returncode == 0, scan_result.stderr
+    assert "SCAN COMPLETE:" in scan_result.stdout
+    run_dir = max(out_dir.glob("*-*"), key=lambda path: path.stat().st_mtime_ns)
+    candidates = run_dir / "candidates.csv"
+    assert candidates.is_file()
+    candidate_text = candidates.read_text(encoding="utf-8")
+    assert "app-caches|SAFE|" in candidate_text
+    assert str(cache) in candidate_text
+
+    # -- cleaner subprocess: clean_contents frees the 5 files, keeps the dir.
+    cleaner_code = "\n".join([
+        "from pathlib import Path",
+        "import runpy, sys",
+        "from unittest import mock",
+        "import psutil",
+        "from scripts.lib import core, platform",
+        "platform.IS_WINDOWS = True",
+        "core.IS_WINDOWS = (sys.platform == 'win32')",
+        f"platform.resolve_fixed_drive = lambda drive: {volume!r}",
+        f"sys.argv = ['cleaner.py','-Drive','X:','-CandidatesCsv',{str(candidates)!r},'-QuarantineDir',{str(quarantine_dir)!r},'-Yes']",
+        "with mock.patch.object(psutil, 'process_iter', return_value=[]):",
+        f"    runpy.run_path({str(workspace / 'scripts' / 'cleaner.py')!r}, run_name='__main__')",
+    ])
+    clean_result = _run_api_subprocess(cleaner_code, workspace, {})
+    assert clean_result.returncode == 0, clean_result.stderr
+    assert "CLEAN COMPLETE:" in clean_result.stdout
+    cleanup_text = (run_dir / "cleanup-errors.csv").read_text(encoding="utf-8")
+    assert cleanup_text.count("|OK\n") == 5, "FM12: every cache file must record OK"
+
+    # (a) cache files gone, (b) Cache dir still exists, (c) data file intact.
+    assert all(not file.exists() for file in cache_files), "FM12: cache files must be freed"
+    assert cache.is_dir(), "FM12: clean_contents must keep the Cache dir"
+    assert data_file.read_text(encoding="utf-8") == data_content, "FM12: app data must be intact"
+
+    # (d) app still starts: the marker reads the data file and exits 0.
+    marker_result = _run_api_subprocess(
+        f"import runpy; runpy.run_path({str(marker)!r}, run_name='__main__')", workspace, {}
+    )
+    assert marker_result.returncode == 0, f"FM12: app no longer starts: {marker_result.stderr}"
+    assert marker_result.stdout == ""

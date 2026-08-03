@@ -93,3 +93,102 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: python scripts/scanner.py -Drive / -Categories root-temps,root-logs
+
+      # FM12 / Todo 12: real-app clean integration test (windows-latest only).
+      # Builds a small fake "app" with a Cache dir (5 files) + a data file,
+      # runs the real scanner -> cleaner (clean_contents) pipeline against it,
+      # then verifies: (a) cache files gone, (b) Cache dir still exists,
+      # (c) the app's data file untouched, (d) a "still starts" marker script
+      # reads the data file and exits 0. No real apps, no elevated cleanup.
+      - name: Real-app clean integration (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          workspace = Path.cwd()
+          root = Path(tempfile.mkdtemp(prefix="fake-app-"))
+          app = root / "Ubisoft Game Launcher"
+          cache = app / "cache"
+          cache.mkdir(parents=True)
+          cache_files = []
+          for index in range(5):
+              cache_file = cache / f"f_{index:06d}"
+              cache_file.write_text("cache", encoding="utf-8")
+              cache_files.append(cache_file)
+          data_file = app / "data.txt"
+          data_content = "app-user-data-0123456789"
+          data_file.write_text(data_content, encoding="utf-8")
+          marker = app / "start_marker.py"
+          marker.write_text(
+              "import pathlib, sys; "
+              f"sys.exit(0 if pathlib.Path({str(data_file)!r}).read_text(encoding='utf-8') == {data_content!r} else 1)\n",
+              encoding="utf-8",
+          )
+          out_dir = root / "out"
+          quarantine_dir = root / "quarantine"
+          volume = {"Root": str(root), "FreeBytes": 1000, "TotalBytes": 5000}
+          env = os.environ.copy()
+          env["PYTHONPATH"] = str(workspace) + os.pathsep + env.get("PYTHONPATH", "")
+
+          def run(code):
+              return subprocess.run(
+                  [sys.executable, "-c", code], cwd=workspace, env=env,
+                  text=True, capture_output=True,
+              )
+
+          scanner_code = "\n".join([
+              "from pathlib import Path",
+              "import runpy, sys",
+              "from unittest import mock",
+              "import psutil",
+              "from scripts.lib import core, platform",
+              "platform.IS_WINDOWS = True",
+              "core.IS_WINDOWS = (sys.platform == 'win32')",
+              f"platform.resolve_fixed_drive = lambda drive: {volume!r}",
+              f"sys.argv = ['scanner.py','-Drive','X:','-OutDir',{str(out_dir)!r},'-Categories','app-caches']",
+              "with mock.patch.object(psutil, 'process_iter', return_value=[]):",
+              f"    runpy.run_path({str(workspace / 'scripts' / 'scanner.py')!r}, run_name='__main__')",
+          ])
+          scan = run(scanner_code)
+          assert scan.returncode == 0, scan.stderr
+          assert "SCAN COMPLETE:" in scan.stdout
+          run_dir = max(out_dir.glob("*-*"), key=lambda path: path.stat().st_mtime_ns)
+          candidates = run_dir / "candidates.csv"
+          assert candidates.is_file()
+          assert "app-caches|SAFE|" in candidates.read_text(encoding="utf-8")
+
+          cleaner_code = "\n".join([
+              "from pathlib import Path",
+              "import runpy, sys",
+              "from unittest import mock",
+              "import psutil",
+              "from scripts.lib import core, platform",
+              "platform.IS_WINDOWS = True",
+              "core.IS_WINDOWS = (sys.platform == 'win32')",
+              f"platform.resolve_fixed_drive = lambda drive: {volume!r}",
+              f"sys.argv = ['cleaner.py','-Drive','X:','-CandidatesCsv',{str(candidates)!r},'-QuarantineDir',{str(quarantine_dir)!r},'-Yes']",
+              "with mock.patch.object(psutil, 'process_iter', return_value=[]):",
+              f"    runpy.run_path({str(workspace / 'scripts' / 'cleaner.py')!r}, run_name='__main__')",
+          ])
+          clean = run(cleaner_code)
+          assert clean.returncode == 0, clean.stderr
+          assert "CLEAN COMPLETE:" in clean.stdout
+          cleanup_text = (run_dir / "cleanup-errors.csv").read_text(encoding="utf-8")
+          assert cleanup_text.count("|OK\n") == 5, "FM12: all 5 cache files must be deleted"
+
+          # (a) cache files gone, (b) Cache dir still exists, (c) data intact.
+          assert all(not file.exists() for file in cache_files), "FM12: cache files must be freed"
+          assert cache.is_dir(), "FM12: clean_contents must keep the Cache dir"
+          assert data_file.read_text(encoding="utf-8") == data_content, "FM12: app data must be intact"
+
+          # (d) app still starts: the marker reads the data file and exits 0.
+          start = run(f"import runpy; runpy.run_path({str(marker)!r}, run_name='__main__')")
+          assert start.returncode == 0, f"FM12: app no longer starts: {start.stderr}"
+          print("REAL-APP CLEAN INTEGRATION: PASS")
+          PY
