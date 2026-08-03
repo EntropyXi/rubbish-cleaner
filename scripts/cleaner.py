@@ -329,21 +329,48 @@ def _category_approved(
     return answer.strip().lower().startswith("y")
 
 
-def _elevated_batch_text(drive: str) -> str:
-    drive_root = drive.rstrip("\\/")
-    windows_root = f"{drive_root}\\Windows"
-    return "\r\n".join(
-        [
-            "@echo off",
-            "setlocal",
-            "net stop wuauserv",
-            "dism.exe /online /cleanup-image /startcomponentcleanup",
-            f'del /f /q "{windows_root}\\Temp\\*"',
-            f'del /f /q "{windows_root}\\Prefetch\\*.pf"',
-            "exit /b 0",
-            "",
-        ]
-    )
+def _elevated_batch_text(drive: str, paths: Sequence[object]) -> str:
+    """Render the UAC-elevated cleanup batch from APPROVED candidate rows.
+
+    Every deletion line is generated per approved file and carries a
+    ``forfiles /d +7`` age gate as defense-in-depth; there is never a bare
+    ``del /f /q <dir>\\*`` command.  ``wuauserv`` is stopped for the DISM
+    step and restarted afterwards, and failures propagate via
+    ``if errorlevel 1 exit /b 1`` instead of an unconditional ``exit /b 0``.
+    """
+    cutoff = timedelta(days=7).total_seconds()
+    now = datetime.now().timestamp()
+    lines = ["@echo off", "setlocal"]
+    has_dism = False
+    for value in paths:
+        path = os.fspath(value)
+        if not path:
+            continue
+        if "StartComponentCleanup" in path:
+            has_dism = True
+            continue
+        if not os.path.isfile(path):
+            continue
+        try:
+            if now - os.stat(path, follow_symlinks=False).st_mtime < cutoff:
+                continue  # only files older than the 7-day window
+        except OSError:
+            continue
+        parent, name = os.path.split(path)
+        if not name or not parent:
+            continue
+        lines.append(
+            f'if exist "{path}" forfiles /d +7 /p "{parent}" /m "{name}" /c "cmd /c del /f /q @path"'
+        )
+    lines.append("net stop wuauserv >nul 2>&1")
+    if has_dism:
+        lines.append("dism.exe /online /cleanup-image /startcomponentcleanup")
+        lines.append("if errorlevel 1 exit /b 1")
+    lines.append("net start wuauserv >nul 2>&1")
+    lines.append("if errorlevel 1 exit /b 1")
+    lines.append("exit /b 0")
+    lines.append("")
+    return "\r\n".join(lines)
 
 
 def _shell_execute_elevated(batch_path: Path) -> int:
@@ -387,6 +414,7 @@ def _handle_elevated(
     is_user_drive: bool,
     is_system_drive: bool,
     shell_execute: Callable[[Path], object],
+    rows: Sequence[dict[str, str]],
 ) -> bool:
     if not (yes or skip_elevated):
         print(f"SKIP: category {category} requires -Yes or -SkipElevated")
@@ -413,7 +441,7 @@ def _handle_elevated(
         return True
 
     batch_path = run_dir / "elevated.bat"
-    _write_text_no_follow(batch_path, _elevated_batch_text(drive))
+    _write_text_no_follow(batch_path, _elevated_batch_text(drive, [row["Path"] for row in rows]))
     print(f"PREPARED: elevated batch written to {batch_path}")
     if skip_elevated:
         _record(
@@ -516,6 +544,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                 is_user_drive=is_user_drive,
                 is_system_drive=is_system_drive,
                 shell_execute=shell_execute,
+                rows=[row for _, row in pending],
             )
         else:
             approved = _category_approved(
