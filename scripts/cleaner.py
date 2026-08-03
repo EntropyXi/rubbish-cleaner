@@ -224,7 +224,14 @@ def _has_traversal_link(path: str) -> bool:
         return True
 
 
-def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_dir: Path) -> str:
+def _process_row(
+    row: dict[str, str],
+    category: str,
+    csv_path: Path,
+    quarantine_dir: Path,
+    *,
+    allow_posix_unlink: bool = False,
+) -> str:
     target = row["Path"]
     action = row["Action"]
     if _has_traversal_link(target):
@@ -268,6 +275,15 @@ def _process_row(row: dict[str, str], category: str, csv_path: Path, quarantine_
                     "SKIP_TOO_RECENT",
                     "re-verify failed: last write is within the 7-day window",
                 )
+        if not IS_WINDOWS and not allow_posix_unlink:
+            return _record(
+                csv_path,
+                category,
+                "Quarantine" if action == "quarantine" else "Remove",
+                target,
+                "SKIP_POSIX_UNSAFE",
+                "POSIX unlink is disabled by default; pass --allow-posix-unlink to override",
+            )
         if core.test_file_locked(target):
             return _record(
                 csv_path,
@@ -496,6 +512,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
     approvals = kwargs.get("approvals")
     input_func = kwargs.get("input_func", input)
     shell_execute = kwargs.get("shell_execute", _shell_execute_elevated)
+    allow_posix_unlink = bool(kwargs.get("allow_posix_unlink", False))
 
     if "is_user_drive" in kwargs:
         is_user_drive = bool(kwargs["is_user_drive"])
@@ -571,6 +588,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                     category,
                     cleanup_csv,
                     Path(quarantine_value or default_quarantine),
+                    allow_posix_unlink=allow_posix_unlink,
                 )
                 dispositions.append({"Category": category, "Path": row["Path"], "Disposition": disposition})
             handled = True
@@ -604,6 +622,8 @@ def _subprocess_args(drive: str, arguments: argparse.Namespace) -> list[str]:
         command.append("-SkipElevated")
     if arguments.Resume:
         command.append("-Resume")
+    if arguments.allow_posix_unlink:
+        command.append("--allow-posix-unlink")
     if arguments.Categories:
         command.extend(["-Categories", ",".join(_split_values(arguments.Categories))])
     return command
@@ -636,6 +656,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-SkipElevated", action="store_true")
     parser.add_argument("-Resume", action="store_true")
     parser.add_argument("-Parallel", action="store_true")
+    parser.add_argument(
+        "--allow-posix-unlink",
+        action="store_true",
+        default=False,
+        help="explicitly allow POSIX unlink of files (default: POSIX files are skipped as unsafe)",
+    )
     return parser
 
 
@@ -659,6 +685,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             categories=arguments.Categories,
             skip_elevated=arguments.SkipElevated,
             resume=arguments.Resume,
+            allow_posix_unlink=arguments.allow_posix_unlink,
         )
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)

@@ -21,7 +21,7 @@ def _tmp_path(tmp_path=None) -> Path:
     return path
 
 
-def test_junk_dispositions_are_the_canonical_twelve(tmp_path=None):
+def test_junk_dispositions_are_the_canonical_thirteen(tmp_path=None):
     expected = [
         "OK",
         "SKIP_LOCKED",
@@ -33,11 +33,12 @@ def test_junk_dispositions_are_the_canonical_twelve(tmp_path=None):
         "SKIP_WSL_REGISTERED",
         "SKIP_ELEVATION_DENIED",
         "SKIP_SERVICE_RUNNING",
+        "SKIP_POSIX_UNSAFE",
         "QUARANTINED",
         "MOVE_FAILED",
     ]
     assert core.JUNK_DISPOSITIONS == expected
-    assert len(set(core.JUNK_DISPOSITIONS)) == 12
+    assert len(set(core.JUNK_DISPOSITIONS)) == 13
 
 
 def test_empty_directory_walk_skips_links_and_nested_empty_directories(tmp_path=None):

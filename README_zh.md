@@ -61,7 +61,7 @@ python scripts/install.py --target all
 2. `/rubbish-cleaner 清理 D 盘：清理内置规则选出的临时文件和应用缓存，但跳过 D:\Downloads 和 D:\Games 里的任何内容。`
 3. `/rubbish-cleaner 看看 E 盘有什么垃圾？只要列出浏览器缓存和日志就行。`
 
-agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分类候选清单 → 等待你批准 → 安全清理（隔离 = 移动到备份目录，绝不永久删除；Windows 报告为锁定的文件会跳过，Linux/macOS 则遵循 POSIX 语义，打开中的文件仍可能被 unlink）→ 校验并写入汇总报告（`.omo\evidence\rubbish-cleaner\` 运行目录下的 `summary.md`）。
+agent 遵循的流程：扫描（只读盘点）→ 向你展示带大小的分类候选清单 → 等待你批准 → 安全清理（隔离 = 移动到备份目录，绝不永久删除；Windows 报告为锁定的文件会跳过，Linux/macOS 则默认跳过无法安全 unlink 的文件，仅可通过 `--allow-posix-unlink` 显式放开）→ 校验并写入汇总报告（`.omo\evidence\rubbish-cleaner\` 运行目录下的 `summary.md`）。
 
 安全要点：一切按盘符、按运行批次隔离作用域；没有任何东西被永久删除（全部隔离）；每次删除前都会重新校验；支持 junction 感知；UAC 提升的系统清理是可选的，拒绝即跳过。
 

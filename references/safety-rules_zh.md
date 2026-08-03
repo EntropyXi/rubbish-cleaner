@@ -70,7 +70,7 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
   才清 `Download\*` 与 `DataStore.edb.old`/`DataStore.jfm.old`，之后重启服务；
   停服务失败 → `SKIP_SERVICE_RUNNING`，跳过该步。
 
-## 8. 处置枚举（12 种 Disposition，见 lib `Get-JunkDispositions`）
+## 8. 处置枚举（13 种 Disposition，见 lib `Get-JunkDispositions`）
 
 | 枚举 | 含义 |
 |------|------|
@@ -84,6 +84,7 @@ UAC 提升批处理（`elevated.ps1`）内的绝对路径显式列出，且仅�
 | `SKIP_WSL_REGISTERED` | WSL 注册中的发行版目录，跳过（D 盘先例） |
 | `SKIP_ELEVATION_DENIED` | UAC 拒绝 / `-SkipElevated`，未执行 |
 | `SKIP_SERVICE_RUNNING` | 相关服务运行中（wuauserv），跳过 |
+| `SKIP_POSIX_UNSAFE` | POSIX 上默认跳过（advisory flock 不可信）；需显式 `--allow-posix-unlink` |
 | `QUARANTINED` | 已移动入隔离目录（非删除） |
 | `MOVE_FAILED` | 隔离移动失败，记录错误消息 |
 
