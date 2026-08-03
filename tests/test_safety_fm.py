@@ -24,6 +24,13 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
   (``X:\\.rubbish-quarantine\\run-<ts>`` on Windows), so ``core.quarantine``
   never crosses a volume boundary (no EXDEV -> no silent ``MOVE_FAILED``);
   an explicit ``-QuarantineDir`` still wins over the same-volume default.
+- FM6: taxonomy mutual exclusion — root-logs drops ``*.tmp`` (leaves .tmp to
+  the age-gated root-temps path) and a scanner claims set enforces
+  single-ownership (a path claimed by one category is never re-added).
+- FM7: path semantic validation — a static-map cache dir whose sampled content
+  carries a data-file suffix (.db/.sqlite/.sqlite3/.sqlitedb/.db-shm/.db-wal/
+  .index/.dat) is upgraded to CAUTION (quarantine), never SAFE/delete;
+  .json/.xml/.ini/.conf/.bak do NOT count as data-like.
 """
 
 from __future__ import annotations
@@ -696,3 +703,136 @@ def test_fm9_quarantine_custom_dir_override(tmp_path=None):
     assert result["quarantine_dir"] == os.fspath(custom), (
         "FM9: the resolved quarantine_dir surfaced in the result must be the override"
     )
+
+
+# --------------------------------------------------------------------------- #
+# FM6 — taxonomy mutual exclusion (root-logs drops *.tmp, claims set)
+# --------------------------------------------------------------------------- #
+
+def test_fm6_root_tmp_single_ownership(tmp_path=None):
+    """FM6: a root-level aged .tmp belongs to EXACTLY ONE category — root-temps
+    (age-gated), never root-logs. Pre-fix root-logs matched ``*.tmp`` and
+    double-claimed it (un-gated)."""
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    aged = _aged_file(fake / "foo.tmp", 10)
+
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = False  # root-temps enumerates context["system_temp"]
+    try:
+        context = {
+            "root": fake,
+            "system_temp": fake,
+            "cutoff": datetime.now() - timedelta(days=7),
+            "rows": [],
+            "checkpoint": {"fileCounter": 0, "totalBytesSoFar": 0, "lastPath": "", "completedCategories": []},
+            "resume_state": None,
+        }
+        scanner._scan_root_temps(context)
+        scanner._scan_root_logs(context)
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    matches = [row for row in context["rows"] if row["Path"] == str(aged)]
+    assert len(matches) == 1, f"FM6 regression: .tmp claimed by multiple categories: {matches}"
+    assert matches[0]["Category"] == "root-temps", (
+        f"FM6 regression: expected root-temps ownership, got {matches}"
+    )
+    assert matches[0]["Risk"] == "SAFE"
+
+
+def test_fm6_claims_set_prevents_double_ownership(tmp_path=None):
+    """FM6: the claims set guarantees single ownership — a path claimed by an
+    earlier category is skipped by any later category."""
+    root = _tmp_path(tmp_path)
+    target = root / "c.log"
+    target.write_text("payload", encoding="utf-8")
+    context: dict = {"rows": []}
+    scanner._add_candidate(context, "root-temps", target, 7, 1)
+    scanner._add_candidate(context, "root-logs", target, 7, 1)
+    assert len(context["rows"]) == 1, "FM6 regression: claims set must enforce single ownership"
+    assert context["rows"][0]["Category"] == "root-temps"
+    assert context["rows"][0]["Risk"] == "SAFE"
+
+
+# --------------------------------------------------------------------------- #
+# FM7 — path semantic validation (data-signature -> CAUTION, never delete)
+# --------------------------------------------------------------------------- #
+
+def test_fm7_data_signature_upgrades_to_caution(tmp_path=None):
+    """FM7: a static-map cache dir whose sampled content includes a data file
+    (e.g. .sqlite) is escalated to CAUTION/quarantine — never SAFE/delete."""
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    local = fake / "Local"
+    cache = local / "Google" / "Chrome" / "User Data" / "Default" / "Cache"
+    cache.mkdir(parents=True)
+    (cache / "data.sqlite").write_text("sqlite db", encoding="utf-8")
+    out_dir = root / "out"
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        with _mock_running(scanner, []):
+            result = scanner.scan(
+                "X:", root_path=fake, out_dir=out_dir, local_app_data=local,
+                categories=["browser-caches"], is_user_drive=True,
+            )
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    rows = [row for row in result["rows"] if row["Category"] == "browser-caches"]
+    assert len(rows) == 1, f"FM7: expected one browser-caches row, got {rows}"
+    assert Path(rows[0]["Path"]) == cache
+    assert rows[0]["Risk"] == "CAUTION", "FM7 regression: data-like cache dir must be CAUTION"
+    assert rows[0]["Action"] == "quarantine", "FM7 regression: CAUTION maps to quarantine, never delete"
+    assert rows[0].get("Reason") == "路径语义可疑，请人工确认"
+
+
+def test_fm7_clean_cache_stays_safe(tmp_path=None):
+    """FM7: a cache dir of small cache files (and .json metadata) passes the
+    signature check and KEEPS its SAFE classification (no false positive)."""
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    local = fake / "Local"
+    cache = local / "Google" / "Chrome" / "User Data" / "Default" / "Cache"
+    cache.mkdir(parents=True)
+    for name in ("f_000001", "f_000002", "meta.json"):
+        (cache / name).write_text("x", encoding="utf-8")
+    out_dir = root / "out"
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True
+    try:
+        with _mock_running(scanner, []):
+            result = scanner.scan(
+                "X:", root_path=fake, out_dir=out_dir, local_app_data=local,
+                categories=["browser-caches"], is_user_drive=True,
+            )
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    rows = [row for row in result["rows"] if row["Category"] == "browser-caches"]
+    assert len(rows) == 1, f"FM7: expected one browser-caches row, got {rows}"
+    assert Path(rows[0]["Path"]) == cache
+    assert rows[0]["Risk"] == "SAFE", "FM7 regression: clean cache dir must keep SAFE"
+    assert rows[0]["Action"] == "delete"
+    assert "Reason" not in rows[0]
+
+
+def test_fm7_signature_helper_identifies_data_suffixes(tmp_path=None):
+    """FM7 helper: every suffix in the data-file set triggers the signature;
+    the explicitly non-data suffixes (.json/.xml/.ini/.conf/.bak) do not."""
+    root = _tmp_path(tmp_path)
+    directory = root / "cache"
+    directory.mkdir()
+    data_files = ("x.db", "y.sqlite", "z.sqlite3", "a.sqlitedb", "b.db-shm", "c.db-wal", "d.index", "e.dat")
+    for name in data_files:
+        (directory / name).write_text("db", encoding="utf-8")
+    assert scanner._content_signature_data_like(directory) is True
+    for name in data_files:
+        (directory / name).unlink()
+    for name in ("meta.json", "conf.xml", "app.ini", "settings.conf", "backup.bak", "f_0001"):
+        (directory / name).write_text("x", encoding="utf-8")
+    assert scanner._content_signature_data_like(directory) is False
