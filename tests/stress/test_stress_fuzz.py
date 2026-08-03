@@ -494,7 +494,26 @@ def _generate_world(
         planted.add("crash-dumps")
 
     # --- filler: 50-300 total entries, bounded
-    entries_now = len(files) + sum(1 for _ in world.rglob("*") if _.is_dir())
+    # Iterative directory count (explicit os.scandir stack).  pathlib.rglob
+    # delegates per-level via C-level recursive yield-from and would raise
+    # RecursionError on the deep-nesting worlds; symlinks are not followed.
+    dir_count = 0
+    stack = [os.fspath(world)]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    dir_count += 1
+                    stack.append(os.path.join(directory, entry.name))
+            except OSError:
+                continue
+    entries_now = len(files) + dir_count
     target_entries = rng.randint(50, 300)
     filler_target = max(10, min(target_entries - entries_now, MAX_FILES - len(files)))
     _plant_filler(rng, seed, iteration, world, files, filler_target)

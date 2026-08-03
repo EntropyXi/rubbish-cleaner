@@ -215,7 +215,14 @@ def test_ten_rounds_no_leak(stress_root):
             # and actually cleaned it (a vacuous no-op round proves nothing).
             assert scan_result["rows"], f"round {round_no}: scanner found no browser-caches candidate"
             assert cache.is_dir(), f"round {round_no}: clean_contents must keep the cache dir"
-            survivors = [path for path in cache.rglob("*") if path.is_file()]
+            # Iterative file listing (os.walk) — pathlib.rglob delegates per-level
+            # via C-level recursive yield-from and can RecursionError on deep
+            # trees; os.walk is iterative and never recurses into symlinks.
+            survivors = [
+                Path(root) / name
+                for root, _dirs, names in os.walk(cache)
+                for name in names
+            ]
             assert not survivors, f"round {round_no}: {len(survivors)} junk files survived cleanup"
             assert clean_result["dispositions"], f"round {round_no}: cleaner recorded no dispositions"
 
