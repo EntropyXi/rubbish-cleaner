@@ -9,6 +9,8 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
 - FM3: the elevated batch is generated from approved candidate rows only, every
   deletion line is age-gated with ``forfiles /d +7``, there is no bare wildcard
   ``del``, and ``wuauserv`` is restarted after the cleanup steps.
+- FM8: ``get_fixed_drives`` returns only fixed local drives; removable, CD and
+  network volumes are filtered out via the ``fixed`` partition opt.
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ import tempfile
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import psutil
 
 from scripts import cleaner
 from scripts.lib.platform import IS_WINDOWS
@@ -261,3 +267,45 @@ def test_fm3_batch_no_bare_wildcard_and_service_restored(tmp_path=None):
         assert not bare, f"FM3 regression: bare wildcard delete present: {line}"
     assert 'del /f /q "C:\\Windows\\Temp\\*"' not in batch
     assert 'del /f /q "C:\\Windows\\Prefetch\\*.pf"' not in batch
+
+
+# --------------------------------------------------------------------------- #
+# FM8 — fixed-drive filter (no removable/CD/network drives)
+# --------------------------------------------------------------------------- #
+
+def test_fm8_removable_drive_excluded(tmp_path=None):
+    """get_fixed_drives must list only fixed local volumes.
+
+    Mocks psutil.disk_partitions to return a fixed C:, a removable E: and a
+    cdrom D:; only the fixed drive may appear in the result. Fails on the
+    pre-fix code (no ``fixed`` opt filter) and passes on the fixed code.
+    """
+    from scripts.lib import platform as platform_lib
+
+    fixed = SimpleNamespace(
+        device="C:\\", mountpoint="C:\\", fstype="NTFS", opts="rw,fixed"
+    )
+    removable = SimpleNamespace(
+        device="E:\\", mountpoint="E:\\", fstype="FAT32", opts="rw,removable"
+    )
+    cdrom = SimpleNamespace(
+        device="D:\\", mountpoint="D:\\", fstype="CDFS", opts="rw,cdrom"
+    )
+    usage = SimpleNamespace(free=1024 * 1024, total=1024 * 1024 * 2)
+
+    original_is_windows = platform_lib.IS_WINDOWS
+    try:
+        platform_lib.IS_WINDOWS = True
+        with mock.patch.object(
+            psutil, "disk_partitions", return_value=[fixed, removable, cdrom]
+        ), mock.patch.object(os.path, "exists", return_value=True), mock.patch.object(
+            psutil, "disk_usage", return_value=usage
+        ):
+            drives = platform_lib.get_fixed_drives()
+    finally:
+        platform_lib.IS_WINDOWS = original_is_windows
+
+    assert "C:\\" in drives, "FM8 regression: fixed C: drive must be listed"
+    assert "E:\\" not in drives, "FM8 regression: removable drive leaked into fixed list"
+    assert "D:\\" not in drives, "FM8 regression: cdrom drive leaked into fixed list"
+    assert drives == ["C:\\"], "FM8 regression: only fixed drive should be returned"

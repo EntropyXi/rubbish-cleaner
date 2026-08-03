@@ -28,6 +28,13 @@ def get_fixed_drives() -> list[str]:
         if not partition.fstype:
             continue
 
+        # FM8: only fixed local volumes are safe to scan. opts carries the
+        # psutil/Windows drive type: "fixed" for local hard disks, "removable"
+        # for USB/card readers, "cdrom" for optical drives, and network mounts
+        # expose no "fixed" flag at all.
+        if "cdrom" in partition.opts or "fixed" not in partition.opts:
+            continue
+
         match = _DRIVE_ROOT.fullmatch(partition.mountpoint)
         if match is None:
             continue
