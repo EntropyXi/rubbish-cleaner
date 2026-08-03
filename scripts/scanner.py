@@ -151,6 +151,19 @@ _CATEGORY_DISPLAY = {
     "crash-dumps": "崩溃转储",
 }
 
+# FM5: execution action enum. Cache categories clean only their CONTENTS and
+# keep the directory; empty-dirs removes only verified-empty directories.
+# Everything else keeps the single-path delete/quarantine behavior.
+CATEGORY_ACTION_MAP = {
+    "app-caches": "clean_contents",
+    "browser-caches": "clean_contents",
+    "gpu-shader": "clean_contents",
+    "dev-caches": "clean_contents",
+    "ide-caches": "clean_contents",
+    "crash-dumps": "clean_contents",
+    "empty-dirs": "remove_if_empty",
+}
+
 _DEFAULT_OUT_DIR = Path(__file__).resolve().parents[1] / ".omo" / "evidence" / "python-migration"
 
 

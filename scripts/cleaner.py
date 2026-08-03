@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 from collections import OrderedDict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -113,6 +113,19 @@ _CATEGORY_DISPLAY = {
     "dev-caches": "开发工具缓存",
     "ide-caches": "IDE 缓存",
     "crash-dumps": "崩溃转储",
+}
+
+# FM5: execution action enum (mirror of scanner.CATEGORY_ACTION_MAP). Cache
+# categories -> clean_contents (delete files inside, KEEP the directory);
+# empty-dirs -> remove_if_empty (only delete verified-empty dirs).
+_CATEGORY_EXECUTION_MAP = {
+    "app-caches": "clean_contents",
+    "browser-caches": "clean_contents",
+    "gpu-shader": "clean_contents",
+    "dev-caches": "clean_contents",
+    "ide-caches": "clean_contents",
+    "crash-dumps": "clean_contents",
+    "empty-dirs": "remove_if_empty",
 }
 
 
@@ -322,6 +335,125 @@ def _has_traversal_link(path: str) -> bool:
         return True
 
 
+def _iter_regular_files(directory: Path) -> Iterable[Path]:
+    """Yield regular files under *directory*, never following links."""
+    stack = [directory]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as iterator:
+                entries = list(iterator)
+        except OSError:
+            continue
+        for entry in entries:
+            child = Path(entry.path)
+            try:
+                if entry.is_symlink() or _has_traversal_link(str(child)):
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(child)
+                    continue
+                yield child
+            except OSError:
+                continue
+
+
+def _clean_contents(
+    category: str,
+    target_dir: str,
+    csv_path: Path,
+    *,
+    running_stems: set[str],
+    allow_posix_unlink: bool,
+) -> str:
+    """FM5: recursively delete FILES inside *target_dir*, KEEPING the directory.
+
+    Every file re-enters the Layer-2 verification chain (junction guard,
+    process gate, lock probe, temp age re-check) before removal. FM4's
+    category gate normally prevents this from running while an owner process
+    is active; the owner check here is defense-in-depth for apps started
+    between the scan and this clean run.
+    """
+    target = Path(target_dir)
+    if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target_dir,
+            "SKIP_NOT_FOUND",
+            "re-verify failed: directory is missing or a traversal link",
+        )
+    if _owners_running(category, running_stems):
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target_dir,
+            "SKIP_LOCKED",
+            "owner process started between scan and clean (defense-in-depth)",
+        )
+
+    deleted = 0
+    for file_path in _iter_regular_files(target):
+        if category in _TEMP_CATEGORIES:
+            try:
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(file_path, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
+            except OSError:
+                too_recent = False
+            if too_recent:
+                _record(
+                    csv_path,
+                    category,
+                    "Remove",
+                    str(file_path),
+                    "SKIP_TOO_RECENT",
+                    "re-verify failed: last write is within the 7-day window",
+                )
+                continue
+        if core.test_file_locked(str(file_path)):
+            _record(
+                csv_path,
+                category,
+                "Remove",
+                str(file_path),
+                "SKIP_LOCKED",
+                "re-verify failed: file is locked (in use by a process)",
+            )
+            continue
+        disposition = core.safe_remove(str(file_path), category, os.fspath(csv_path))
+        if disposition == "OK":
+            deleted += 1
+    return "OK"
+
+
+def _remove_if_empty(category: str, target_dir: str, csv_path: Path) -> str:
+    """FM5: delete *target_dir* only when it is verified empty (junction-aware)."""
+    if not os.path.isdir(target_dir) or _has_traversal_link(target_dir):
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target_dir,
+            "SKIP_NOT_FOUND",
+            "re-verify failed: directory is missing or a traversal link",
+        )
+    if not core.is_dir_empty(target_dir):
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target_dir,
+            "SKIP_NOT_EMPTY",
+            "re-verify failed: directory is not empty",
+        )
+    return core.safe_remove(target_dir, category, os.fspath(csv_path))
+
+
 def _process_row(
     row: dict[str, str],
     category: str,
@@ -329,9 +461,26 @@ def _process_row(
     quarantine_dir: Path,
     *,
     allow_posix_unlink: bool = False,
+    running_stems: Optional[set[str]] = None,
 ) -> str:
     target = row["Path"]
     action = row["Action"]
+    running = running_stems if running_stems is not None else set()
+
+    # FM5 dispatch: cache categories clean only their contents (keeping the
+    # directory); empty-dirs removes only verified-empty directories.
+    execution = _CATEGORY_EXECUTION_MAP.get(category, "delete")
+    if execution == "clean_contents" and os.path.isdir(target):
+        return _clean_contents(
+            category,
+            target,
+            csv_path,
+            running_stems=running,
+            allow_posix_unlink=allow_posix_unlink,
+        )
+    if execution == "remove_if_empty":
+        return _remove_if_empty(category, target, csv_path)
+
     if _has_traversal_link(target):
         return _record(
             csv_path,
@@ -712,6 +861,7 @@ def clean(drive: str, **kwargs: Any) -> dict[str, Any]:
                     cleanup_csv,
                     Path(quarantine_value or default_quarantine),
                     allow_posix_unlink=allow_posix_unlink,
+                    running_stems=running_stems,
                 )
                 dispositions.append({"Category": category, "Path": row["Path"], "Disposition": disposition})
             handled = True
