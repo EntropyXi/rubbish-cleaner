@@ -259,11 +259,27 @@ def _read_candidates(path: Path) -> list[dict[str, str]]:
                     f"Malformed candidates.csv row {index + 2}: unknown Category '{row['Category']}'"
                 )
             expected_risk = _CATEGORY_RISK_MAP[canonical_category]
-            expected_action = _RISK_ACTION_MAP[expected_risk]
-            if row["Risk"] != expected_risk or row["Action"] != expected_action:
+            # FM7: a normally-SAFE cache category may carry an escalated
+            # CAUTION row (data-signature -> quarantine). CAUTION is the ONLY
+            # allowed escalation, and only for SAFE (or already-CAUTION)
+            # categories. The row's action must match ITS OWN risk, so a
+            # CAUTION row can never carry Action=delete.
+            if row["Risk"] == "CAUTION":
+                if expected_risk not in {"SAFE", "CAUTION"}:
+                    raise ValueError(
+                        f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                        f"cannot carry the FM7 CAUTION escalation"
+                    )
+            elif row["Risk"] != expected_risk:
                 raise ValueError(
                     f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
-                    f"requires Risk '{expected_risk}' and Action '{expected_action}'"
+                    f"requires Risk '{expected_risk}'"
+                )
+            expected_action = _RISK_ACTION_MAP[row["Risk"]]
+            if row["Action"] != expected_action:
+                raise ValueError(
+                    f"Malformed candidates.csv row {index + 2}: category '{row['Category']}' "
+                    f"requires Action '{expected_action}' for Risk '{row['Risk']}'"
                 )
             row["Category"] = canonical_category
             try:
@@ -281,7 +297,11 @@ def _group_rows(rows: list[dict[str, str]]) -> OrderedDict[str, list[tuple[int, 
         groups.setdefault(row["Category"], []).append((index, row))
     for category, entries in groups.items():
         risks = {row["Risk"] for _, row in entries}
-        if len(risks) != 1:
+        canonical = _CATEGORY_RISK_MAP.get(category)
+        # FM7: a SAFE (or CAUTION) category may mix canonical + CAUTION rows
+        # when some of its directories carry the data-signature escalation.
+        allowed = {canonical, "CAUTION"} if canonical in {"SAFE", "CAUTION"} else {canonical}
+        if not risks.issubset(allowed):
             raise ValueError(f"Category '{category}' has inconsistent Risk values")
     return groups
 
@@ -502,14 +522,31 @@ def _process_row(
     running_stems: Optional[set[str]] = None,
     dry_run: bool = False,
 ) -> str:
+    """Dispatch ONE candidate row to the right execution path.
+
+    FM7 x FM5: the ROW's explicit Action wins over the category->execution
+    default. A cache directory whose content signature is data-like is
+    escalated to CAUTION with Action=quarantine — it must be MOVED to
+    quarantine (never ``clean_contents``'d in place). The category map
+    (cache -> clean_contents, empty-dirs -> remove_if_empty) is only a
+    DEFAULT for plain ``delete`` rows; a row that says ``quarantine`` /
+    ``clean_contents`` / ``ask`` is honored verbatim.
+    """
     target = row["Path"]
     action = row["Action"]
+    risk = row["Risk"]
     running = running_stems if running_stems is not None else set()
 
-    # FM5 dispatch: cache categories clean only their contents (keeping the
-    # directory); empty-dirs removes only verified-empty directories.
-    execution = _CATEGORY_EXECUTION_MAP.get(category, "delete")
-    if execution == "clean_contents" and os.path.isdir(target):
+    if action == "quarantine" or risk == "CAUTION":
+        return _quarantine_path(
+            category,
+            target,
+            csv_path,
+            quarantine_dir,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+    if action == "clean_contents":
         return _clean_contents(
             category,
             target,
@@ -518,8 +555,40 @@ def _process_row(
             allow_posix_unlink=allow_posix_unlink,
             dry_run=dry_run,
         )
-    if execution == "remove_if_empty":
-        return _remove_if_empty(category, target, csv_path, dry_run=dry_run)
+    if action == "delete":
+        # FM5 default: cache categories clean only their contents (keeping the
+        # directory); empty-dirs removes only verified-empty directories.
+        execution = _CATEGORY_EXECUTION_MAP.get(category, "delete")
+        if execution == "clean_contents" and os.path.isdir(target):
+            return _clean_contents(
+                category,
+                target,
+                csv_path,
+                running_stems=running,
+                allow_posix_unlink=allow_posix_unlink,
+                dry_run=dry_run,
+            )
+        if execution == "remove_if_empty":
+            return _remove_if_empty(category, target, csv_path, dry_run=dry_run)
+        return _single_path_remove(
+            category,
+            target,
+            csv_path,
+            action,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
+    if action == "ask":
+        # Approval was already resolved at the CATEGORY level; the item goes
+        # through the same single-path, lock-probed remove path.
+        return _single_path_remove(
+            category,
+            target,
+            csv_path,
+            action,
+            allow_posix_unlink=allow_posix_unlink,
+            dry_run=dry_run,
+        )
 
     if _has_traversal_link(target):
         if dry_run:
@@ -528,21 +597,117 @@ def _process_row(
         return _record(
             csv_path,
             category,
-            "Quarantine" if action == "quarantine" else "Remove",
+            "Remove",
             target,
             "SKIP_JUNCTION",
             "refusing a symlink, junction, or linked ancestor",
         )
-    if action not in {"quarantine", "delete", "ask"}:
-        print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
-        return "SKIP_REPORT_ONLY"
+    print(f"  SKIP: '{target}' has unhandled Action '{action}' (report-only, nothing touched)")
+    return "SKIP_REPORT_ONLY"
+
+
+def _quarantine_path(
+    category: str,
+    target: str,
+    csv_path: Path,
+    quarantine_dir: Path,
+    *,
+    allow_posix_unlink: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Quarantine a single path (FM7 CAUTION escalation or CAUTION category).
+
+    FM2: quarantine runs the SAME lock probe as delete — there is no
+    early-return bypass; a locked item is SKIP_LOCKED / SKIP_POSIX_UNSAFE,
+    never moved. A non-empty directory is MOVED whole (``os.rename`` moves
+    trees); only the delete path refuses non-empty dirs.
+    """
+    if _has_traversal_link(target):
+        if dry_run:
+            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | quarantine (SKIP_JUNCTION)")
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Quarantine",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
+    if dry_run:
+        print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | quarantine")
+        return "DRY_RUN"
+    if os.path.isfile(target):
+        if category in _TEMP_CATEGORIES:
+            try:
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(target, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
+            except OSError:
+                too_recent = False
+            if too_recent:
+                return _record(
+                    csv_path,
+                    category,
+                    "Quarantine",
+                    target,
+                    "SKIP_TOO_RECENT",
+                    "re-verify failed: last write is within the 7-day window",
+                )
+        # FM1: POSIX never consults the advisory flock probe for a deletion
+        # decision unless the user opted in explicitly with --allow-posix-unlink.
+        if not IS_WINDOWS and not allow_posix_unlink:
+            return _record(
+                csv_path,
+                category,
+                "Quarantine",
+                target,
+                "SKIP_POSIX_UNSAFE",
+                "POSIX unlink is disabled by default; pass --allow-posix-unlink to override",
+            )
+        if core.test_file_locked(target):
+            return _record(
+                csv_path,
+                category,
+                "Quarantine",
+                target,
+                "SKIP_LOCKED",
+                "re-verify failed: file is locked",
+            )
+    return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
+
+
+def _single_path_remove(
+    category: str,
+    target: str,
+    csv_path: Path,
+    action: str,
+    *,
+    allow_posix_unlink: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """Single-path remove for delete/ask rows with no category-level default.
+
+    Junction guard first, then the FM1/FM2 lock-probe chain, then
+    ``core.safe_remove``. Non-empty directories are never removed.
+    """
+    if _has_traversal_link(target):
+        if dry_run:
+            print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action} (SKIP_JUNCTION)")
+            return "DRY_RUN"
+        return _record(
+            csv_path,
+            category,
+            "Remove",
+            target,
+            "SKIP_JUNCTION",
+            "refusing a symlink, junction, or linked ancestor",
+        )
     if dry_run:
         print(f"DRY-RUN: {category} | {_size_of(target)} bytes | {target} | {action}")
         return "DRY_RUN"
-
-    # FM1/FM2: quarantine and delete run the SAME lock probe. The quarantine
-    # early-return must NOT bypass it, and on POSIX an unlink decision never
-    # consults the advisory flock probe unless the user opted in explicitly.
     if os.path.isdir(target):
         if not core.is_dir_empty(target):
             return _record(
@@ -556,23 +721,29 @@ def _process_row(
     elif os.path.isfile(target):
         if category in _TEMP_CATEGORIES:
             try:
-                too_recent = datetime.now().timestamp() - os.stat(target, follow_symlinks=False).st_mtime < timedelta(days=7).total_seconds()
+                too_recent = (
+                    datetime.now().timestamp()
+                    - os.stat(target, follow_symlinks=False).st_mtime
+                    < timedelta(days=7).total_seconds()
+                )
             except OSError:
                 too_recent = False
             if too_recent:
                 return _record(
                     csv_path,
                     category,
-                    "Quarantine" if action == "quarantine" else "Remove",
+                    "Remove",
                     target,
                     "SKIP_TOO_RECENT",
                     "re-verify failed: last write is within the 7-day window",
                 )
+        # FM1: POSIX never consults the advisory flock probe for a deletion
+        # decision unless the user opted in explicitly with --allow-posix-unlink.
         if not IS_WINDOWS and not allow_posix_unlink:
             return _record(
                 csv_path,
                 category,
-                "Quarantine" if action == "quarantine" else "Remove",
+                "Remove",
                 target,
                 "SKIP_POSIX_UNSAFE",
                 "POSIX unlink is disabled by default; pass --allow-posix-unlink to override",
@@ -581,23 +752,11 @@ def _process_row(
             return _record(
                 csv_path,
                 category,
-                "Quarantine" if action == "quarantine" else "Remove",
+                "Remove",
                 target,
                 "SKIP_LOCKED",
                 "re-verify failed: file is locked",
             )
-
-    if action == "quarantine":
-        return core.quarantine(target, os.fspath(quarantine_dir), category, os.fspath(csv_path))
-    if _has_traversal_link(target):
-        return _record(
-            csv_path,
-            category,
-            "Remove",
-            target,
-            "SKIP_JUNCTION",
-            "refusing a symlink, junction, or linked ancestor",
-        )
     return core.safe_remove(target, category, os.fspath(csv_path))
 
 
