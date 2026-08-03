@@ -65,15 +65,35 @@ def _snapshot(root: Path) -> str:
     """Record the stress-root subtree: relative path | sha256 | size, sorted."""
     lines = []
     guard = root / "__sentinel" / "guard.txt"
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            size = path.stat().st_size
-            lines.append(f"{path.relative_to(root)}|{digest}|{size}")
+    # Iterative traversal with an explicit os.scandir stack.  ``pathlib.rglob``
+    # and ``os.walk`` both delegate per-directory-level via C-level ``yield
+    # from`` recursion, so a ~1000-level chain planted by the deep-nesting
+    # stress tests raises RecursionError before a single hash is recorded.
+    stack = [os.fspath(root)]
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = list(iterator)
+        except OSError:
+            continue
+        for entry in entries:
+            full = os.path.join(directory, entry.name)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(full)
+                    continue
+                if not entry.is_file():
+                    continue
+                digest = hashlib.sha256(Path(full).read_bytes()).hexdigest()
+                size = os.stat(full).st_size
+            except OSError:
+                continue
+            lines.append(f"{Path(full).relative_to(root)}|{digest}|{size}")
     # Always report the guard file explicitly even if it vanished mid-test.
     if not guard.exists():
         lines.append("__sentinel/guard.txt|MISSING|0")
-    return "\n".join(lines)
+    return "\n".join(sorted(lines))
 
 
 @pytest.fixture(autouse=True)

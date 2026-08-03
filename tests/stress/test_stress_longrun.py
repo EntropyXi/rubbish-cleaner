@@ -49,6 +49,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
 from unittest import mock
 
 import psutil
@@ -170,8 +171,8 @@ def test_ten_rounds_no_leak(stress_root):
     rounds_dir = integration / "leak-rounds"
     rounds_dir.mkdir(parents=True, exist_ok=True)
     total_rounds = _WARM_UP_ROUNDS + _MEASURED_ROUNDS
-    baseline_rss: int | None = None
-    baseline_handles: int | None = None
+    baseline_rss: Optional[int] = None
+    baseline_handles: Optional[int] = None
     rss_peaks: list[int] = []
     handle_peaks: list[int] = []
     try:

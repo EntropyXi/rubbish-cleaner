@@ -59,7 +59,7 @@ import random
 import shutil
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 
@@ -264,7 +264,7 @@ def _try_write_file(
     world: Path,
     parent: Path,
     files: dict[str, dict[str, Any]],
-) -> Path | None:
+) -> Optional[Path]:
     for _ in range(8):
         name = _file_name(rng)
         path = parent / name
@@ -348,8 +348,8 @@ def _generate_world(
     old = time.time() - 30 * 86400  # aged > 7-day window for temp age gates
 
     def add(rel_dir: str, n_range: tuple[int, int], *, aged: bool = False,
-            data_suffix: str | None = None,
-            fname: str | None = None) -> Path:
+            data_suffix: Optional[str] = None,
+            fname: Optional[str] = None) -> Path:
         directory = world.joinpath(*rel_dir.split("/"))
         directory.mkdir(parents=True, exist_ok=True)
         count = rng.randint(*n_range)
