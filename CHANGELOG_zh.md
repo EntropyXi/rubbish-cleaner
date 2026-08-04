@@ -4,6 +4,29 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [v2.1.1] - 2026-08-04
+
+修复 C 盘实测验证（运行 C-20260804-190536-482080）发现的两个分类缺陷的补丁版本。
+
+### 修复
+
+- 根目录日志系统所有者排除：根目录下由操作系统所有（Windows 上 SYSTEM — 通过
+  `FILE_ATTRIBUTE_SYSTEM` 标志或无法读取的所有者 ACL 判定；POSIX 上 uid 0）的
+  `.log`/`*_install.log` 文件不再成为候选 — 提升权限的运行绝不能删除
+  `C:\DumpStack.log` 这类系统文件。Windows 采用两级检查（`scripts/scanner.py`
+  的 `_is_system_owned`）；仅隐藏属性的用户文件仍会被标记。
+- 用户临时目录安装器/卸载器豁免：安装类工件即使超过 7 天门限也豁免于 user-temp 分类 —
+  精确后缀（`.exe`/`.msi`/`.msu`/`.msp`/`.cab`）或文件名中（小写后）包含整词安装器关键字
+  （`setup`/`install`/`unins`/`uninstall`/`updater`）。保护 `英雄联盟卸载.exe`、
+  `antigravity-ide-download.exe` 与 `vscode-inno-updater-*.log`；`install.log` 按设计豁免。
+  通用临时垃圾（`.tmp`/`.dll`/`.node`/`.bat`/`.json`）仍可清理。
+
+### 测试
+
+- 在 [`tests/test_safety_fm.py`](tests/test_safety_fm.py) 中新增 FM14（根目录日志系统所有者排除，
+  含仅隐藏属性不过度排除边界）与 FM15（用户临时目录安装器豁免）回归覆盖
+  （全部测试套件合计 59 条断言）。
+
 ## [v2.1.0] - 2026-08-03
 
 安全加固版本。一次跨卷隔离事故的事后分析识别出九个故障模式（FM1–FM9，完整分析见

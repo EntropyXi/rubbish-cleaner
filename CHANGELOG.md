@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.1.1] - 2026-08-04
+
+Patch release fixing two classification defects found by the C-drive real-scan
+validation (run C-20260804-190536-482080).
+
+### Fixed
+
+- Root-logs system-owner exclusion: root-level `.log`/`*_install.log` files owned by the
+  OS (SYSTEM on Windows via the `FILE_ATTRIBUTE_SYSTEM` flag or an unreadable owner ACL,
+  uid 0 on POSIX) are no longer candidates — an elevated run must never delete
+  `C:\DumpStack.log`-style system files. Two-tier Windows check
+  (`scripts/scanner.py` `_is_system_owned`); a Hidden-only user file is still flagged.
+- User-temp installer/uninstaller exemption: installer artifacts are exempt from the
+  user-temp category even past the 7-day gate — exact suffix (`.exe`/`.msi`/`.msu`/`.msp`/`.cab`)
+  or a whole-word installer keyword (`setup`/`install`/`unins`/`uninstall`/`updater`) in the
+  casefolded filename. Protects `英雄联盟卸载.exe`, `antigravity-ide-download.exe`, and
+  `vscode-inno-updater-*.log`; `install.log` is exempted by design. Generic temp junk
+  (`.tmp`/`.dll`/`.node`/`.bat`/`.json`) stays eligible.
+
+### Testing
+
+- Added FM14 (root-logs system-owner exclusion, incl. the Hidden-only no-over-exclusion
+  edge) and FM15 (user-temp installer exemption) regression coverage in
+  [`tests/test_safety_fm.py`](tests/test_safety_fm.py) (59 assertions total across all suites).
+
 ## [v2.1.0] - 2026-08-03
 
 Safety hardening release. A post-mortem of a cross-volume quarantine incident
