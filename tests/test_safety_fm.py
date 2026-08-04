@@ -38,6 +38,15 @@ Each ``test_fmN_*`` test FAILS on the pre-fix code and PASSES on the fixed code:
   path | size | category | action, the interactive confirmation shows
   "将删除 N 个文件 / X MB" plus the first rows, and the post-clean report lists
   deleted + skipped + reasons.
+- FM14: root-logs system-owner exclusion (v2.1.1) — a root-level .log whose
+  owner is the OS (SYSTEM on Windows via FILE_ATTRIBUTE_SYSTEM or an unreadable
+  owner ACL, uid 0 on POSIX) is never a candidate; a Hidden-only (0x2) file
+  with a readable user ACL is still flagged (no over-exclusion).
+- FM15: user-temp installer exemption (v2.1.1) — installer/uninstaller
+  artifacts (``.exe``/``.msi``/``.msu``/``.msp``/``.cab`` suffix or a whole-word
+  setup/install/unins/uninstall/updater in the casefolded name, ``install.log``
+  included BY DESIGN) stay exempt past the 7-day gate; generic ``.tmp`` junk
+  remains a candidate.
 """
 
 from __future__ import annotations
@@ -1104,3 +1113,151 @@ def test_fm12_real_app_clean_integration(tmp_path=None):
     )
     assert marker_result.returncode == 0, f"FM12: app no longer starts: {marker_result.stderr}"
     assert marker_result.stdout == ""
+
+
+# --------------------------------------------------------------------------- #
+# FM14 — root-logs system-owner exclusion (v2.1.1, two-tier attribute + ACL)
+# --------------------------------------------------------------------------- #
+
+def test_fm14_root_logs_system_owned_skipped(tmp_path=None):
+    """FM14: a root-level .log owned by the OS is NOT a root-logs candidate.
+
+    Pre-fix ``_scan_root_logs`` had no owner check, so ``C:\\DumpStack.log``
+    (SYSTEM-owned) was flagged SAFE/delete and only survived at clean time via
+    the lock probe. Post-fix the ``_is_system_owned`` gate skips it; a user
+    .log is still a candidate (control).
+
+    Also exercises the ``_is_system_owned`` helper's Windows two-tier check and
+    its no-over-exclusion edge (Metis Finding 10): a Hidden-only (0x2) file
+    whose owner ACL is readable and owned by a normal user is NOT system-owned
+    — a user's own hidden .log must still be flagged.
+    """
+    root = _tmp_path(tmp_path)
+    fake = root / "fake"
+    fake.mkdir()
+    user_log = _aged_file(fake / "rubbish_user_control.log", 10)
+
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = False  # _scan_root_logs only needs context["root"] here
+    try:
+        context = {
+            "root": fake,
+            "cutoff": datetime.now() - timedelta(days=7),
+            "rows": [],
+            "checkpoint": {"fileCounter": 0, "totalBytesSoFar": 0, "lastPath": "", "completedCategories": []},
+            "resume_state": None,
+        }
+        # System-owned -> skipped entirely.
+        with mock.patch.object(scanner, "_is_system_owned", return_value=True):
+            scanner._scan_root_logs(context)
+        assert context["rows"] == [], (
+            f"FM14: system-owned root log must NOT be a candidate, got {context['rows']}"
+        )
+        # User-owned -> one candidate.
+        with mock.patch.object(scanner, "_is_system_owned", return_value=False):
+            scanner._scan_root_logs(context)
+        rows = [row for row in context["rows"] if row["Path"] == str(user_log)]
+        assert len(rows) == 1, f"FM14: user-owned root log must stay a candidate, got {rows}"
+        assert rows[0]["Category"] == "root-logs"
+        assert rows[0]["Risk"] == "SAFE"
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    # -- Helper tier checks (all use a fake root .log + mocked stat/ACL).
+    target = fake / "DumpStack.log"
+    target.write_text("payload", encoding="utf-8")
+
+    # Tier 1 — FILE_ATTRIBUTE_SYSTEM (0x4) -> True without any ACL query.
+    system_stat = SimpleNamespace(st_file_attributes=0x4, st_uid=0)
+    with mock.patch.object(scanner.os, "stat", return_value=system_stat):
+        assert scanner._is_system_owned(target) is True
+
+    # Tier 2 primary signal — owner ACL read fails with ERROR_ACCESS_DENIED
+    # (5, the live C:\\DumpStack.log case where Attributes=0x20) -> True.
+    scanner.IS_WINDOWS = True
+    try:
+        archive_stat = SimpleNamespace(st_file_attributes=0x20, st_uid=0)
+        fake_denied = mock.MagicMock()
+        fake_denied.GetNamedSecurityInfoW.return_value = 5  # ERROR_ACCESS_DENIED
+        with mock.patch.object(scanner.os, "stat", return_value=archive_stat), mock.patch.object(
+            ctypes.windll, "advapi32", fake_denied
+        ):
+            assert scanner._is_system_owned(target) is True
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    # Metis Finding 10 edge — Hidden-only (0x2, no System flag) + a readable
+    # ACL owned by a normal user SID (not S-1-5-18) -> False, never over-excluded.
+    scanner.IS_WINDOWS = True
+    try:
+        hidden_stat = SimpleNamespace(st_file_attributes=0x2, st_uid=0)
+        fake_acl = mock.MagicMock()
+        fake_acl.GetNamedSecurityInfoW.return_value = 0  # owner ACL readable
+        # Successful SID render that writes no SYSTEM SID text -> plain user.
+        fake_acl.ConvertSidToStringSidW.return_value = True
+        with mock.patch.object(scanner.os, "stat", return_value=hidden_stat), mock.patch.object(
+            ctypes.windll, "advapi32", fake_acl
+        ):
+            assert scanner._is_system_owned(target) is False
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    # POSIX branch — uid 0 is system-owned, a regular uid is not.
+    scanner.IS_WINDOWS = False
+    try:
+        root_stat = SimpleNamespace(st_uid=0)
+        with mock.patch.object(scanner.os, "stat", return_value=root_stat):
+            assert scanner._is_system_owned(target) is True
+        user_stat = SimpleNamespace(st_uid=1000)
+        with mock.patch.object(scanner.os, "stat", return_value=user_stat):
+            assert scanner._is_system_owned(target) is False
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+
+# --------------------------------------------------------------------------- #
+# FM15 — user-temp installer/uninstaller exemption (v2.1.1, whole-word)
+# --------------------------------------------------------------------------- #
+
+def test_fm15_user_temp_installer_exempt(tmp_path=None):
+    """FM15: installer/uninstaller artifacts in user Temp are exempt past the
+    7-day gate; generic junk stays a candidate (control).
+
+    ``unins000.exe`` (exact .exe suffix) and ``setup-x64.exe`` (exact .exe
+    suffix) are exempt; ``install.log`` is exempt BY DESIGN (whole-word
+    ``install`` in the casefolded name — Oracle Finding A resolution); only
+    ``wctCDFA.tmp`` remains a candidate. Pre-fix only the 7-day gate applied,
+    so all four aged files became candidates."""
+    root = _tmp_path(tmp_path)
+    local_app_data = root / "fake" / "Local"
+    temp_dir = local_app_data / "Temp"
+    temp_dir.mkdir(parents=True)
+    unins = _aged_file(temp_dir / "unins000.exe", 10)
+    setup = _aged_file(temp_dir / "setup-x64.exe", 10)
+    install_log = _aged_file(temp_dir / "install.log", 10)
+    junk = _aged_file(temp_dir / "wctCDFA.tmp", 10)
+
+    old_is_windows = scanner.IS_WINDOWS
+    scanner.IS_WINDOWS = True  # user-temp scans local_app_data / Temp on Windows
+    try:
+        context = {
+            "local_app_data": local_app_data,
+            "cutoff": datetime.now() - timedelta(days=7),
+            "rows": [],
+            "checkpoint": {"fileCounter": 0, "totalBytesSoFar": 0, "lastPath": "", "completedCategories": []},
+            "resume_state": None,
+        }
+        scanner._scan_user_temp(context)
+    finally:
+        scanner.IS_WINDOWS = old_is_windows
+
+    candidate_paths = {row["Path"] for row in context["rows"]}
+    assert str(junk) in candidate_paths, "FM15: generic .tmp must stay a candidate"
+    assert str(unins) not in candidate_paths, "FM15: unins000.exe must be exempt"
+    assert str(setup) not in candidate_paths, "FM15: setup-x64.exe must be exempt"
+    assert str(install_log) not in candidate_paths, (
+        "FM15: install.log must be exempt by design (whole-word 'install')"
+    )
+    assert len(candidate_paths) == 1, (
+        f"FM15: expected only wctCDFA.tmp, got {sorted(candidate_paths)}"
+    )
