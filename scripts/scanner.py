@@ -593,7 +593,7 @@ def _scan_duplicate_archives(context: dict[str, Any]) -> None:
 
 def _scan_empty_dirs(context: dict[str, Any]) -> None:
     category = "empty-dirs"
-    skipped = {"$recycle.bin", "system volume information", ".claude"}
+    skipped = {"$recycle.bin", "system volume information", ".claude", "program files", "program files (x86)", "inetpub", "xboxgames", "windows"}
     for path in _list_directories(context["root"]):
         if path.name.casefold() in skipped:
             continue

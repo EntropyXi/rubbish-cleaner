@@ -4,6 +4,25 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，并遵循 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [v2.1.2] - 2026-08-04
+
+修复 CD 盘实测验证（2026-08-04）发现的 empty-dirs 分类缺陷的补丁版本：空目录扫描器现在跳过
+保留/系统目录，绝不把它们报告为垃圾候选。
+
+### 修复
+
+- 空目录保留/系统目录排除：`_scan_empty_dirs`（`scripts/scanner.py`）现在跳过
+  `Program Files`、`Program Files (x86)`、`inetpub`、`XboxGames` 与 `Windows`
+  （不区分大小写），再加上原有的 `$Recycle.Bin`、`System Volume Information` 与 `.claude`
+  排除项。把用户安装根目录或操作系统保留目录标记为垃圾是错误的信号 —— 尽管
+  `remove_if_empty` + `os.rmdir` 仍是 fail-safe（SKIP_LOCKED，不会真删）。
+  真正为空的用户目录（例如根目录下的 `junk` 文件夹）仍会被标记。
+
+### 测试
+
+- 在 [`tests/test_safety_fm.py`](tests/test_safety_fm.py) 中新增 FM16（空目录跳过保留/系统目录）
+  回归覆盖（全部测试套件合计 60 条断言）。
+
 ## [v2.1.1] - 2026-08-04
 
 修复 C 盘实测验证（运行 C-20260804-190536-482080）发现的两个分类缺陷的补丁版本。
