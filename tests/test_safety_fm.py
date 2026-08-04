@@ -1264,3 +1264,45 @@ def test_fm15_user_temp_installer_exempt(tmp_path=None):
     assert len(candidate_paths) == 1, (
         f"FM15: expected only wctCDFA.tmp, got {sorted(candidate_paths)}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# FM16 — empty-dirs reserved/system directory exclusion (v2.1.2)
+# --------------------------------------------------------------------------- #
+
+def test_fm16_empty_dirs_skips_reserved_dirs(tmp_path=None):
+    """FM16: ``_scan_empty_dirs`` must NOT flag OS-reserved / default-install /
+    app-root directories as junk candidates even when they are empty.
+
+    Pre-fix the reserved set was only ``{$recycle.bin, system volume
+    information, .claude}`` so empty ``Program Files`` / ``Program Files (x86)``
+    / ``inetpub`` / ``XboxGames`` / ``Windows`` were wrongly flagged (found by
+    CD-drive validation 2026-08-04). Post-fix only the control ``junkdir`` is a
+    candidate."""
+    root = _tmp_path(tmp_path)
+    reserved_names = [
+        "Program Files",
+        "Program Files (x86)",
+        "inetpub",
+        "XboxGames",
+        "Windows",
+    ]
+    for name in reserved_names:
+        (root / name).mkdir()
+    junkdir = root / "junkdir"
+    junkdir.mkdir()
+
+    context = {"root": root, "rows": []}
+    scanner._scan_empty_dirs(context)
+
+    candidate_paths = {row["Path"] for row in context["rows"]}
+    for name in reserved_names:
+        assert str(root / name) not in candidate_paths, (
+            f"FM16: reserved/system dir {name!r} must not be an empty-dirs candidate"
+        )
+    assert str(junkdir) in candidate_paths, (
+        "FM16: genuinely empty user dir junkdir must stay a candidate"
+    )
+    assert len(candidate_paths) == 1, (
+        f"FM16: expected only junkdir, got {sorted(candidate_paths)}"
+    )

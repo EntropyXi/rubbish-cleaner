@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v2.1.2] - 2026-08-04
+
+Patch release fixing an empty-dirs classification defect found by the CD-drive
+validation (2026-08-04): the empty-directories scanner now skips reserved/system
+directories that must never be reported as junk candidates.
+
+### Fixed
+
+- Empty-dirs reserved/system-directory exclusion: `_scan_empty_dirs`
+  (`scripts/scanner.py`) now skips `Program Files`, `Program Files (x86)`,
+  `inetpub`, `XboxGames`, and `Windows` (case-insensitive), in addition to the
+  existing `$Recycle.Bin`, `System Volume Information`, and `.claude`
+  exclusions. Flagging a user install-root or an OS-reserved directory as junk
+  was a wrong signal — even though `remove_if_empty` + `os.rmdir` remain
+  fail-safe (SKIP_LOCKED). Genuinely empty user directories (e.g. a root-level
+  `junk` folder) are still flagged.
+
+### Testing
+
+- Added FM16 (empty-dirs skips reserved/system directories) regression coverage
+  in [`tests/test_safety_fm.py`](tests/test_safety_fm.py) (60 assertions total across all suites).
+
 ## [v2.1.1] - 2026-08-04
 
 Patch release fixing two classification defects found by the C-drive real-scan
