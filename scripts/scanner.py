@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta
@@ -243,6 +244,97 @@ def _is_older_than(path: Path, cutoff: datetime) -> bool:
         return os.path.getmtime(path) < cutoff.timestamp()
     except OSError:
         return False
+
+
+def _is_system_owned(path: Path) -> bool:
+    """True when the OS owns the file (SYSTEM on Windows, uid 0 on POSIX).
+
+    Windows uses a two-tier check: the FILE_ATTRIBUTE_SYSTEM flag first (cheap,
+    catches files the filesystem itself marks system-owned), then the file's
+    security-descriptor owner ACL.  A root file whose owner ACL cannot even be
+    read (ERROR_ACCESS_DENIED) is treated as system-owned — live data shows
+    C:\\DumpStack.log has Attributes=Archive (0x20), not System (0x4), yet its
+    owner query returns ERROR_ACCESS_DENIED.  Any unexpected error returns
+    False so the scan never crashes.
+    """
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    if not IS_WINDOWS:
+        return st.st_uid == 0
+    if (int(getattr(st, "st_file_attributes", 0)) & 0x4) != 0:
+        return True
+    # Tier 2: read the file's owner ACL (SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION).
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi32 = ctypes.windll.advapi32
+    except (ImportError, AttributeError, OSError):
+        return False
+    try:
+        get_owner = advapi32.GetNamedSecurityInfoW
+        get_owner.argtypes = [
+            wintypes.LPCWSTR,  # pObjectName
+            wintypes.DWORD,  # ObjectType (SE_FILE_OBJECT = 0x1)
+            wintypes.DWORD,  # SecurityInfo (OWNER_SECURITY_INFORMATION = 0x1)
+            ctypes.POINTER(ctypes.c_void_p),  # ppsidOwner
+            ctypes.POINTER(ctypes.c_void_p),  # ppsidGroup
+            ctypes.POINTER(ctypes.c_void_p),  # ppDacl
+            ctypes.POINTER(ctypes.c_void_p),  # ppSacl
+            ctypes.POINTER(ctypes.c_void_p),  # ppSecurityDescriptor
+        ]
+        get_owner.restype = wintypes.DWORD
+        owner = ctypes.c_void_p()
+        status = get_owner(
+            os.fspath(path),
+            0x1,  # SE_FILE_OBJECT
+            0x1,  # OWNER_SECURITY_INFORMATION
+            ctypes.byref(owner),
+            None,
+            None,
+            None,
+            None,
+        )
+    except Exception:
+        return False
+    if status == 5:  # ERROR_ACCESS_DENIED -> unreadable owner ACL -> system-owned
+        return True
+    if status != 0:  # any other unexpected Win32 error
+        return False
+    # The ACL was readable: NT AUTHORITY\\SYSTEM's well-known SID is S-1-5-18.
+    try:
+        to_string = advapi32.ConvertSidToStringSidW
+        to_string.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        to_string.restype = wintypes.BOOL
+        sid_text = wintypes.LPWSTR()
+        if not to_string(owner, ctypes.byref(sid_text)):
+            return False
+        try:
+            return (sid_text.value or "").upper() == "S-1-5-18"
+        finally:
+            if sid_text.value:
+                local_free = ctypes.windll.kernel32.LocalFree
+                local_free.argtypes = [wintypes.HLOCAL]
+                local_free.restype = wintypes.HLOCAL
+                local_free(sid_text)
+    except Exception:
+        return False
+
+
+# v2.1.1: installer/uninstaller/updater artifacts are exempt from user-temp even
+# past the 7-day gate.  Exact suffix match, or a whole-word installer keyword in
+# the casefolded full filename.  'install.log' IS exempt by design (the '.' is a
+# word boundary); generic junk such as installer_data.tmp / wctCDFA.tmp is NOT.
+_INSTALLER_SUFFIXES = frozenset({".exe", ".msi", ".msu", ".msp", ".cab"})
+_INSTALLER_PATTERNS = re.compile(r"\b(setup|install|unins|uninstall|updater)\b")
+
+
+def _is_installer_artifact(path: Path) -> bool:
+    return (
+        path.suffix.casefold() in _INSTALLER_SUFFIXES
+        or _INSTALLER_PATTERNS.search(path.name.casefold()) is not None
+    )
 
 
 def _checkpoint_payload(state: dict[str, Any], category: str, last_path: str) -> dict[str, Any]:
@@ -483,6 +575,10 @@ def _scan_root_logs(context: dict[str, Any]) -> None:
         # FM6: root-logs drops *.tmp — .tmp files belong to root-temps (age
         # gate + delete-time recheck), never to the un-gated root-logs scan.
         if path.suffix.casefold() in {".log"} or ("_install" in lower_name and lower_name.endswith(".log")):
+            # v2.1.1: OS-owned root logs (SYSTEM/uid-0) are never candidates —
+            # an elevated run must not delete them.
+            if _is_system_owned(path):
+                continue
             _add_candidate(context, category, path, size, 1)
 
 
@@ -680,6 +776,10 @@ def _scan_user_temp(context: dict[str, Any]) -> None:
         size = _file_size(path)
         _tick_file(context["checkpoint"], category, path, size)
         if _is_older_than(path, context["cutoff"]):
+            # v2.1.1: installer/uninstaller/updater artifacts stay exempt even
+            # past the 7-day gate — a stale installer is not junk.
+            if _is_installer_artifact(path):
+                continue
             _add_candidate(context, category, path, size, 1)
 
 
