@@ -69,6 +69,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 import psutil
 
 from scripts import cleaner, scanner
@@ -1119,6 +1121,7 @@ def test_fm12_real_app_clean_integration(tmp_path=None):
 # FM14 — root-logs system-owner exclusion (v2.1.1, two-tier attribute + ACL)
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.skipif(not IS_WINDOWS, reason="ctypes.windll is Windows-only")
 def test_fm14_root_logs_system_owned_skipped(tmp_path=None):
     """FM14: a root-level .log owned by the OS is NOT a root-logs candidate.
 
